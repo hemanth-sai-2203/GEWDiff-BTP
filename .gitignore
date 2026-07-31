@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# VS Code
+.vscode/
+
+# Models
+*.pth
+*.pt
+*.ckpt
+
+# Outputs
+result/
+outputs/
+
+# Dataset
+data/
+
+# Logs
+*.log
+
+# Notebook
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
