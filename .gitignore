@@ -15,8 +15,7 @@ __pycache__/
 result/
 outputs/
 
-# Dataset
-data/
+
 
 # Logs
 *.log
