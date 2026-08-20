@@ -33,8 +33,8 @@ class UNet2DModelWithBN(UNet2DModel):
         for module in self.down_blocks:
             for layer in module.resnets:
                 layer.conv2 = nn.Sequential(
-                    layer.conv2,  
-                    nn.BatchNorm2d(layer.conv2.out_channels) 
+                    layer.conv2,
+                    nn.BatchNorm2d(layer.conv2.out_channels)
                 )
         for module in self.up_blocks:
             for layer in module.resnets:
@@ -76,7 +76,7 @@ class UNet2DModelWithBN(UNet2DModel):
         for name in names[:-1]:
             parent_module = getattr(parent_module, name)
         return parent_module, names[-1]
-    
+
 class SpectralFidelityEnhancer(nn.Module):
     """Spectral Fidelity Enhancement Module"""
     def __init__(self, in_channels=200):
@@ -91,7 +91,7 @@ class SpectralFidelityEnhancer(nn.Module):
             nn.GELU(),
             nn.Conv2d(self.mid_channels, in_channels, 1),
         )
-        
+
 
     def forward(self, x):
         # Channel Attention Enhancement
@@ -102,18 +102,18 @@ class SpectralFidelityEnhancer(nn.Module):
         # # Let att be in the range [0, 1.5]
         x_att = torch.clamp(x_att, min=0.0, max=1.5)
         return x + 1 * x_att  # Residual connection
-    
-  
+
+
 class UNet2DWithSpectralFidelity(UNet2DModel):
     """Improved UNet2D model with integrated spectral fidelity enhancement"""
-    def __init__(self, *args, 
+    def __init__(self, *args,
                  norm_type='instance',
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.norm_type = norm_type
         self._replace_norm_layers()
         self._replace_layers_with_spectral_enhancer()
-                    
+
     def _get_parent_module_and_name(self, full_name):
         """
         Get the parent module and the child module name from the full module path.
@@ -147,23 +147,23 @@ class UNet2DWithSpectralFidelity(UNet2DModel):
                 # insert SpectralFidelityEnhancer
                 new_module = nn.Sequential(
                 module,
-                SpectralFidelityEnhancer(in_channels=in_channels)  
+                SpectralFidelityEnhancer(in_channels=in_channels)
                 )
                 # Replace the layers in UNet
                 parent_module, child_name = self._get_parent_module_and_name(name)
                 setattr(parent_module, child_name, new_module)
 
-   
+
 class UNet3DWithSpectralFidelity(UNet3DModel):
     """Improved UNet2D model with integrated spectral fidelity enhancement"""
-    def __init__(self, *args, 
+    def __init__(self, *args,
                  norm_type='instance',
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.norm_type = norm_type
         self._replace_norm_layers()
         self._replace_layers_with_spectral_enhancer()
-                    
+
     def _get_parent_module_and_name(self, full_name):
         """
         Get the parent module and the child module name from the full module path.
@@ -194,7 +194,7 @@ class UNet3DWithSpectralFidelity(UNet3DModel):
         for name, module in self.named_modules():
             if isinstance(module, nn.Conv2d):
                 in_channels = module.out_channels  # Need to match the number of SpectralFidelityEnhancer input channels
-            
+
                 new_module = nn.Sequential(
                 module,
                 SpectralFidelityEnhancer(in_channels=in_channels)
@@ -202,15 +202,15 @@ class UNet3DWithSpectralFidelity(UNet3DModel):
                 parent_module, child_name = self._get_parent_module_and_name(name)
                 setattr(parent_module, child_name, new_module)
 
-    
+
 class SpectralFeatureExtractorPretrained(nn.Module):
     def __init__(self, in_channels=242):
         super(SpectralFeatureExtractorPretrained, self).__init__()
         # Loading the pre-trained VGG19 model
-        vgg = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)  
+        vgg = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
         #vgg = models.vgg19(pretrained=True).features
         #self.feature_layers = nn.Sequential(*list(vgg[:16]))  # Use the first 16 layers of VGG
-        self.feature_layers = nn.Sequential(*list(vgg.features.children())[:16]) 
+        self.feature_layers = nn.Sequential(*list(vgg.features.children())[:16])
         # Since the number of channels of the hyperspectral image does not match, we can add a convolutional layer to adjust the number of input channels.
         self.conv_adjust = nn.Conv2d(in_channels, 3, kernel_size=1, stride=1)
 
@@ -221,12 +221,12 @@ class SpectralFeatureExtractorPretrained(nn.Module):
         fetures_gen = self.feature_layers(gen_img)
         fetures_real = self.feature_layers(real_img)
         return loss(fetures_gen, fetures_real)
-    
+
 def gradient_loss(x_generated, x_real):
     """ Compute gradient consistency loss """
-    c = x_generated.shape[1]  
-    device = x_generated.device 
-    dtype = x_generated.dtype  
+    c = x_generated.shape[1]
+    device = x_generated.device
+    dtype = x_generated.dtype
 
     # Create a Sobel filter (1, 1, 3, 3)
     sobel_x = torch.tensor(
@@ -236,15 +236,15 @@ def gradient_loss(x_generated, x_real):
     sobel_y = sobel_x.transpose(2, 3)  # y direction Sobel
 
     # Copy to multichannel to make it work with `groups=c`
-    sobel_x = sobel_x.repeat(c, 1, 1, 1)  
-    sobel_y = sobel_y.repeat(c, 1, 1, 1)  
+    sobel_x = sobel_x.repeat(c, 1, 1, 1)
+    sobel_y = sobel_y.repeat(c, 1, 1, 1)
 
     grad_x_gen = F.conv2d(x_generated, sobel_x, padding=1, groups=c)
     grad_y_gen = F.conv2d(x_generated, sobel_y, padding=1, groups=c)
     grad_x_real = F.conv2d(x_real, sobel_x, padding=1, groups=c)
     grad_y_real = F.conv2d(x_real, sobel_y, padding=1, groups=c)
     # Calculating L1 loss
-    loss = F.l1_loss(grad_x_gen, grad_x_real) + F.l1_loss(grad_y_gen, grad_y_real) 
+    loss = F.l1_loss(grad_x_gen, grad_x_real) + F.l1_loss(grad_y_gen, grad_y_real)
     loss = loss / 2  # Divide by 2 to make it smoother
     return loss
 
@@ -263,9 +263,9 @@ def edge_aware_noise_schedule(noise_map, edge_map, sigmas, strength=0.1):
     # blur edge
     edge_map = F.avg_pool2d(edge_map, 3, stride=1, padding=1)
     edge_map = edge_map.reshape((batch_size,1,256,256))
-    edge_scale = 1 - (1-scaler*scaler) * edge_map * strength 
+    edge_scale = 1 - (1-scaler*scaler) * edge_map * strength
     edge_aware_noise = noise_map * edge_scale
-    
+
     return edge_aware_noise
 def compute_gradient(x):
     """
@@ -319,10 +319,10 @@ def extract(a, t, x_shape):
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 def extract(a, t, x_shape):
     b, *_ = t.shape
-    
+
     # Ensure t is on the same device as a
     t = t.to(a.device)  # Move t to the device of a
-    
+
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 def SAM(x, y):
@@ -426,7 +426,7 @@ class ElucidatedDiffusion(nn.Module):
         self.sqrt_one_minus_alphas_bar = torch.sqrt(1 - torch.linspace(0, 1, num_sample_steps + 1) ** 2)
         self.transition_fn = lambda num_steps, t, transition_pt, k: (1 - torch.tanh((t - transition_pt) * k)) / 2
         self.transition_pt = 0.5
-        self.lambda_min = 1e-4 
+        self.lambda_min = 1e-4
         self.lambda_max = 1e-1
         self.k = 10
         self.S_churn = S_churn
@@ -466,7 +466,7 @@ class ElucidatedDiffusion(nn.Module):
     #    perona_malik = torch.sqrt(1.0 + (x_grad / lambdas[:, None, None, None])).to(device)
     #    time_transition_scaling = self.transition_fn(self.num_sample_steps, t_idx, self.transition_pt, self.k).to(device)
     #    return one_min_alpha_bar_t / ((perona_malik * (1.0 - time_transition_scaling[:, None, None, None])) + time_transition_scaling[:, None, None, None])
-    
+
 
     def preconditioned_network_forward(self, noised_images, img_lr, sigma, mask=None,self_cond=None, clamp=False,i=None):
         batch, device = noised_images.shape[0], noised_images.device
@@ -483,8 +483,8 @@ class ElucidatedDiffusion(nn.Module):
         mask=mask.reshape((batch,1,self.image_size,self.image_size))
 
         combined_input = torch.cat([
-        self.c_in(padded_sigma) * noised_images, 
-        img_lr, 
+        self.c_in(padded_sigma) * noised_images,
+        img_lr,
         mask
         ], dim=1).to(device, torch.float32)
 
@@ -510,14 +510,14 @@ class ElucidatedDiffusion(nn.Module):
         sigmas = F.pad(sigmas, (0, 1), value = 0.) # last step is sigma value of 0.
         return sigmas
 
-    
+
 
     def noise_distribution(self, batch_size,device="cuda"):
         return (self.P_mean + self.P_std * torch.randn((batch_size,), device=device)).exp()
 
     def loss_weight(self, sigma):
         return (sigma ** 2 + self.sigma_data ** 2) * (sigma * self.sigma_data) ** -2
- 
+
     def forward(self, img_lr, images,mask=None,edge=None):
         batch_size, c, h, w, device, image_size, channels = *images.shape, images.device, self.image_size, self.channels
 
@@ -646,3 +646,74 @@ class ElucidatedDiffusion(nn.Module):
             images = (sigma_ip1 / sigma_i) * images - sigma_ip1 * (torch.exp(-h) - 1) * D_i
             images = torch.nan_to_num(images, nan=0.0)
         return images, images
+
+    @torch.no_grad()
+    def sample_cfg(self, img_lr, batch_size=1, num_sample_steps=None, mask=None, guidance_scale=1.0):
+        """
+        Sample with Classifier-Free Guidance (CFG)
+
+        CFG formula:
+                denoised = denoised_uncond + guidance_scale * (denoised_cond - denoised_uncond)
+
+        Args:
+            img_lr: Low-resolution conditioning image
+            batch_size: Batch size
+            num_sample_steps: Number of denoising steps (default from config)
+            mask: Optional mask conditioning
+            guidance_scale: CFG strength (1.0 = conditional baseline, >1.0 = stronger guidance)
+
+        Returns:
+            denoised: Final high-resolution prediction
+            images: Final noise level (for consistency with sample())
+        """
+
+        if guidance_scale == 1.0:
+            # If guidance scale is 1.0, just run normal sampling (more efficient)
+            return self.sample(img_lr, batch_size, num_sample_steps, mask)
+
+        device, num_sample_steps = img_lr.device, default(num_sample_steps, self.num_sample_steps)
+        sigmas = self.sample_schedule(num_sample_steps, device=device)
+
+        shape = (batch_size, self.channels, self.image_size, self.image_size)
+        images = sigmas[0] * torch.randn(shape, device=device)
+
+        sigma_fn = lambda t: t.neg().exp()
+        t_fn = lambda sigma: torch.tensor(sigma).log().neg() if isinstance(sigma, float) else sigma.log().neg()
+
+        old_denoised = None
+
+        for i in tqdm(range(len(sigmas) - 1)):
+            # STEP 1: Compute conditional prediction (with img_lr guidance)
+            denoised_cond = self.preconditioned_network_forward(
+                images, img_lr, sigmas[i].item(), mask, i=i
+            )
+
+            # STEP 2: Compute unconditional prediction (without img_lr guidance)
+            # Create zero conditioning
+            img_lr_uncond = torch.zeros_like(img_lr)
+            mask_uncond = torch.zeros_like(mask) if mask is not None else None
+
+            denoised_uncond = self.preconditioned_network_forward(
+                images, img_lr_uncond, sigmas[i].item(), mask_uncond, i=i
+            )
+
+            # STEP 3: Apply CFG guidance formula
+            denoised = denoised_uncond + guidance_scale * (
+                        denoised_cond - denoised_uncond)
+
+            # Continue with standard denoising step (same as sample())
+            t, t_next = t_fn(sigmas[i]), t_fn(sigmas[i + 1])
+            h = t_next - t
+
+            if not exists(old_denoised) or sigmas[i + 1] == 0:
+                denoised_d = denoised
+            else:
+                h_last = t - t_fn(sigmas[i - 1])
+                r = h_last / h
+                gamma = -1 / (2 * r)
+                denoised_d = (1 - gamma) * denoised + gamma * old_denoised
+
+            images = (sigma_fn(t_next) / sigma_fn(t)) * images - (-h).expm1() * denoised_d
+            old_denoised = denoised
+
+        return denoised, images

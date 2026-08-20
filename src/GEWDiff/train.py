@@ -15,6 +15,14 @@ from accelerate.utils import set_seed # reproducability across devices
 from diffusers import UNet2DModel
 from diffusers.optimization import get_cosine_schedule_with_warmup
 
+from model.edm import (
+    ElucidatedDiffusion,
+    UNet2DModelWithBN,
+    UNet2DWithSpectralFidelity,
+    UNet3DWithSpectralFidelity
+)
+from cfg_core import CFGElucidatedDiffusion
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3"  # The GPUs visible to PyTorch (visible indices: 0, 1, 2, 3)
 import torch.distributed as dist
@@ -35,7 +43,7 @@ class TrainingConfig:
     def __init__(self, compack_bands=31, pca_bands=3,train_batch_size=2, num_timesteps=500, num_epochs=40, mask=True, edge=True, l1_lambda=0.9, l2_lambda=0.1, l3_lambda=0.01,recall=0):
         self.compack_bands = compack_bands
         self.pca_bands = pca_bands
-        self.image_size = 64 
+        self.image_size = 64
         self.train_batch_size = train_batch_size
         self.eval_batch_size = 1  # how many images to sample during evaluation
         self.num_epochs = num_epochs
@@ -97,14 +105,27 @@ def train_step(batch, step, diffusion, optimizer, lr_scheduler,scaler,progress_b
         x_r=y#diffusion.img2res(y,x)
     ##noisy_images = noise_scheduler.add_noise(clean_images, noise, t)
     ##noise_pred = model(noisy_images, t, return_dict=False)[0]
-        if config.mask & config.edge == False:
-            loss,loss1,loss2,loss3 = diffusion(x,x_r,None,None)
-        elif config.mask == True & config.edge == False:
-            loss,loss1,loss2,loss3= diffusion(x,x_r,mask,None)
-        elif config.mask == False & config.edge == True:
-            loss,loss1,loss2,loss3= diffusion(x,x_r,None,edge)
+        # CFG: 10% probability to drop conditioning (train unconditional path)
+        use_cfg = np.random.rand() < 0.1
+
+        if use_cfg:
+            # Train unconditional path (zero out conditioning signals)
+            loss,loss1,loss2,loss3 = diffusion(
+                torch.zeros_like(x),
+                x_r,
+                torch.zeros_like(mask) if config.mask else None,
+                torch.zeros_like(edge) if config.edge else None
+            )
         else:
-            loss,loss1,loss2,loss3= diffusion(x,x_r,mask,edge)
+            # Normal training with conditioning
+            if config.mask & config.edge == False:
+                loss,loss1,loss2,loss3 = diffusion(x,x_r,None,None)
+            elif config.mask == True & config.edge == False:
+                loss,loss1,loss2,loss3= diffusion(x,x_r,mask,None)
+            elif config.mask == False & config.edge == True:
+                loss,loss1,loss2,loss3= diffusion(x,x_r,None,edge)
+            else:
+                loss,loss1,loss2,loss3= diffusion(x,x_r,mask,edge)
     #loss = diffusion.loss_fn(noise_pred, noise, t)
     ###loss = diffusion.loss_fn(x_recon, y, t)
         if scaler != None:
@@ -164,7 +185,7 @@ def eval_step(batch, diffusion, config):
             loss,loss1,loss2,loss3= diffusion(x,x_r,None,edge)
         else:
             loss,loss1,loss2,loss3= diffusion(x,x_r,mask,edge)
-        
+
         print(f'loss1: {loss1.item()}',f'loss2: {loss2.item()}',f'loss3: {loss3.item()}')
     return loss
 
@@ -177,7 +198,7 @@ def eval_epoch(val_loader, diffusion, config):
         val_losses.append(loss.item())
     return np.mean(val_losses)
 
-    
+
 def save_checkpoint(unet, gaussian_diff, optimizer, epoch, loss):
     checkpoint = {
         'unet_state_dict': unet.state_dict(),
@@ -211,7 +232,7 @@ def train_loop(config,mixed_precision="fp16", seed=42):
 # 或者直接查看设备
     print(f"Using device: {accelerator.device}")
     with accelerator.main_process_first():
-        
+
         #model = UNet2DModelWithBN(
         #sample_size=config.out_size,
         #in_channels=config.pca_bands * 2+1,
@@ -247,8 +268,16 @@ def train_loop(config,mixed_precision="fp16", seed=42):
     if accelerator.is_main_process:
         print(f"Training on {accelerator.num_processes} GPUs")
 
-    diffusion = ElucidatedDiffusion(model,image_size=config.out_size, channels=config.pca_bands ,num_sample_steps=config.num_timesteps, l1_lambda=config.l1_lambda, l2_lambda=config.l2_lambda, l3_lambda=config.l3_lambda)
-    #print(diffusion.parameters().dtype)
+    diffusion = CFGElucidatedDiffusion(
+        model,
+        image_size=config.out_size,
+        channels=config.pca_bands,
+        num_sample_steps=config.num_timesteps,
+        l1_lambda=config.l1_lambda,
+        l2_lambda=config.l2_lambda,
+        l3_lambda=config.l3_lambda,
+        p_drop=0.10
+    )    #print(diffusion.parameters().dtype)
 #model=nn.DataParallel(model).to(device)#,device_ids = gpu_ids,output_device=output_device)
 #model.to(device)
 #torch.cuda.set_device(torch.cuda.current_device())
@@ -258,7 +287,7 @@ def train_loop(config,mixed_precision="fp16", seed=42):
 
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: min(1, (epoch + 1) / config.lr_warmup_steps))
-    
+
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=config.lr_warmup_steps,
@@ -335,13 +364,13 @@ def train_loop(config,mixed_precision="fp16", seed=42):
             plt.close()
         else:
             print("Warning: Loss lists are empty, skipping plot.")
-    accelerator.wait_for_everyone() 
+    accelerator.wait_for_everyone()
     diffusion = accelerator.unwrap_model(diffusion)
 # Example usage
     save_checkpoint(model, diffusion, optimizer, epoch, best_val_loss)
 if __name__ == "__main__":
     args = parse_args()
-    
+
     # Create the TrainingConfig object with command-line arguments
     config = TrainingConfig(
         compack_bands=args.compack_bands,
@@ -357,7 +386,7 @@ if __name__ == "__main__":
         recall=args.recall
 
     )
-    
+
     print("Training Configuration:")
     print(f"Compack Bands: {config.compack_bands}")
     print(f"PCA Bands: {config.pca_bands}")
