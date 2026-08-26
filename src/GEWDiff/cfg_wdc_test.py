@@ -295,7 +295,7 @@ class TrainingConfig:
 
 Config = TrainingConfig
 PCA_BANDS = 20
-COMPACK_BANDS = 31
+COMPACK_BANDS = 121
 OUT_SIZE = 256
 
 
@@ -311,7 +311,7 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the diffusion model with specified parameters.")
-    parser.add_argument("--compack_bands", type=int, default=31, help="Number of compack bands.")
+    parser.add_argument("--compack_bands", type=int, default=121, help="Number of compack bands.")
     parser.add_argument("--pca_bands",  type=int, default=20, help="Number of PCA bands.")
     parser.add_argument("--train_batch_size", type=int, default=2, help="Batch size for training.")
     parser.add_argument("--timesteps", type=int, default=500, help="Number of timesteps.")
