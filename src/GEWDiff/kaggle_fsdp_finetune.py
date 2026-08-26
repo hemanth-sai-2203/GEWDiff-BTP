@@ -47,6 +47,7 @@ from kaggle_hf_stream import (
 )
 
 CHECKPOINT = ROOT / "checkpoints" / "epoch_200.pth"
+CFG_RESUME = ROOT / "results" / "fsdp_cfg" / "cfg_step_0000800.pth"
 MANIFEST = ROOT / "hf_manifest" / "train_manifest.json"
 OUTPUT = ROOT / "results" / "fsdp_cfg"
 TMP = ROOT / "hf_tmp_fsdp_train"
@@ -292,14 +293,36 @@ def main():
     )
 
     # --------------------------------------------------------
-    # LOAD BASE CHECKPOINT
+    # LOAD RESUME / BASE CHECKPOINT
     # --------------------------------------------------------
 
-    checkpoint = torch.load(
-        CHECKPOINT,
-        map_location="cpu",
-        weights_only=False,
-    )
+    resume_step = 0
+
+    if CFG_RESUME.exists():
+        checkpoint = torch.load(
+            CFG_RESUME,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        resume_step = int(checkpoint.get("step", 0))
+
+        log(
+            rank,
+            f"CFG checkpoint loaded | step={resume_step}",
+        )
+
+    else:
+        checkpoint = torch.load(
+            CHECKPOINT,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        log(
+            rank,
+            f"Base checkpoint loaded | epoch={checkpoint.get('epoch')}",
+        )
 
     missing, unexpected = model.load_state_dict(
         checkpoint["unet_state_dict"],
@@ -307,18 +330,11 @@ def main():
     )
 
     if missing or unexpected:
-
         raise RuntimeError(
             f"Checkpoint mismatch: "
             f"missing={len(missing)}, "
             f"unexpected={len(unexpected)}"
         )
-
-    log(
-        rank,
-        f"Base checkpoint loaded | "
-        f"epoch={checkpoint.get('epoch')}",
-    )
 
     del checkpoint
     gc.collect()
@@ -406,7 +422,7 @@ def main():
 
     order = np.arange(len(manifest))
 
-    step = 0
+    step = resume_step
     epoch = 0
 
     start_time = time.time()
@@ -437,12 +453,59 @@ def main():
 
                 # ------------------------------------------------
                 # STREAM ONE SAMPLE
+                # DATA ERRORS ARE SAFELY SKIPPED
+                # ACROSS ALL FSDP RANKS.
                 # ------------------------------------------------
 
-                sample = fetch_and_preprocess(
-                    record,
-                    TMP / f"rank_{rank}",
+                sample = None
+                fetch_ok = True
+
+                try:
+                    sample = fetch_and_preprocess(
+                        record,
+                        TMP / f"rank_{rank}",
+                    )
+
+                except Exception as exc:
+                    fetch_ok = False
+
+                    log(
+                        rank,
+                        f"SKIP bad sample={record['gt']} | "
+                        f"{type(exc).__name__}: {exc}",
+                    )
+
+                # ------------------------------------------------
+                # IMPORTANT:
+                # Both FSDP ranks must make the SAME decision.
+                #
+                # If rank 1 gets a bad sample while rank 0 gets
+                # a valid sample, rank 0 must NOT enter forward()
+                # because FSDP collectives would otherwise mismatch.
+                #
+                # MIN -> if either rank failed, BOTH skip.
+                # ------------------------------------------------
+
+                fetch_flag = torch.tensor(
+                    1 if fetch_ok else 0,
+                    device=device,
+                    dtype=torch.int32,
                 )
+
+                dist.all_reduce(
+                    fetch_flag,
+                    op=dist.ReduceOp.MIN,
+                )
+
+                if fetch_flag.item() == 0:
+
+                    if sample is not None:
+                        del sample
+
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                    continue
 
                 lr = sample[
                     "img_lr_hf"

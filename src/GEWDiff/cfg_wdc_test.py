@@ -258,7 +258,7 @@ def resize_image_to_quarter(image_np):
     resized_image = zoom(image_np, zoom_factors, order=3)  # Use cubic interpolation
     return resized_image
 class TrainingConfig:
-    def __init__(self, compack_bands=31, pca_bands=3,train_batch_size=2, num_timesteps=500, num_epochs=40, mask=True, edge=True, l1_lambda=0.9, l2_lambda=0.1, l3_lambda=0.01,
+    def __init__(self, compack_bands=31, pca_bands=20,train_batch_size=2, num_timesteps=500, num_epochs=40, mask=True, edge=True, l1_lambda=0.9, l2_lambda=0.1, l3_lambda=0.01,
                  sigma_min=0.0005, sigma_max=80, sigma_data=0.5, rho=3):
         self.compack_bands = compack_bands
         self.pca_bands = pca_bands
@@ -288,6 +288,17 @@ class TrainingConfig:
         self.sigma_data = sigma_data
         self.rho = rho
 
+
+# ============================================================
+# KAGGLE MODULE-LEVEL COMPATIBILITY
+# ============================================================
+
+Config = TrainingConfig
+PCA_BANDS = 20
+COMPACK_BANDS = 31
+OUT_SIZE = 256
+
+
 # Parse arguments from the command line
 def str2bool(v):
     if isinstance(v, bool):
@@ -301,7 +312,7 @@ def str2bool(v):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the diffusion model with specified parameters.")
     parser.add_argument("--compack_bands", type=int, default=31, help="Number of compack bands.")
-    parser.add_argument("--pca_bands",  type=int, default=3, help="Number of PCA bands.")
+    parser.add_argument("--pca_bands",  type=int, default=20, help="Number of PCA bands.")
     parser.add_argument("--train_batch_size", type=int, default=2, help="Batch size for training.")
     parser.add_argument("--timesteps", type=int, default=500, help="Number of timesteps.")
     parser.add_argument("--num_epochs", type=int, default=40, help="Number of training epochs.")
@@ -315,6 +326,269 @@ def parse_args():
     parser.add_argument("--sigma_data", type=float, default=0.5, help="Sigma data value.")
     parser.add_argument("--rho", type=float, default=7, help="Rho value.")
     return parser.parse_args()
+# ============================================================
+# STREAMING PREPROCESSOR
+# Uses the SAME Dataset preprocessing logic:
+# RWA -> PCA(31) -> first 20 PCA channels -> /14000
+# ============================================================
+
+def preprocess_gt(gt_path: str, mask_path=None, edge_path=None):
+
+    import numpy as np
+    import torch
+    import tifffile
+    from scipy.ndimage import zoom
+    from sklearn.decomposition import PCA
+
+    # --------------------------------------------------------
+    # Load GT
+    # --------------------------------------------------------
+
+    gt_raw = tifffile.imread(gt_path)
+
+    if gt_raw.ndim != 3:
+        raise ValueError(
+            f"Expected 3D HSI cube, got shape {gt_raw.shape}"
+        )
+
+    # Repository expects CHW
+    if gt_raw.shape[0] < gt_raw.shape[-1]:
+        # Most WDC cubes are bands-first.
+        # Do NOT transpose automatically if already CHW.
+        pass
+
+    bands = gt_raw.shape[0]
+
+    if bands < COMPACK_BANDS:
+        raise ValueError(
+            f"Need at least {COMPACK_BANDS} bands, got {bands}"
+        )
+
+    # --------------------------------------------------------
+    # Determine RWA level EXACTLY as Dataset
+    # --------------------------------------------------------
+
+    if COMPACK_BANDS - 1 >= int(bands / 2):
+        level = 1
+    elif COMPACK_BANDS - 1 >= int(bands / 4):
+        level = 2
+    elif COMPACK_BANDS - 1 >= int(bands / 8):
+        level = 3
+    elif COMPACK_BANDS - 1 >= int(bands / 16):
+        level = 4
+    elif COMPACK_BANDS - 1 >= int(bands / 32):
+        level = 5
+    elif COMPACK_BANDS - 1 >= int(bands / 64):
+        level = 6
+    elif COMPACK_BANDS - 1 >= int(bands / 128):
+        level = 7
+    elif COMPACK_BANDS - 1 >= int(bands / 256):
+        level = 8
+    else:
+        raise ValueError(
+            f"Cannot determine RWA level for {bands} bands"
+        )
+
+    # --------------------------------------------------------
+    # GT normalization
+    # --------------------------------------------------------
+
+    gt_float = gt_raw.astype(np.float32) / 10000.0
+
+    # --------------------------------------------------------
+    # Create LR from original spatial resolution
+    # --------------------------------------------------------
+
+    lr_float = zoom(
+        gt_float,
+        (1.0, 0.25, 0.25),
+        order=3,
+    )
+
+    # --------------------------------------------------------
+    # Resize both to repository output size
+    # --------------------------------------------------------
+
+    gt_tensor = torch.from_numpy(gt_float).float()
+    lr_tensor = torch.from_numpy(lr_float).float()
+
+    gt_tensor = torch.nn.functional.interpolate(
+        gt_tensor.unsqueeze(0),
+        size=(OUT_SIZE, OUT_SIZE),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0)
+
+    lr_tensor = torch.nn.functional.interpolate(
+        lr_tensor.unsqueeze(0),
+        size=(OUT_SIZE, OUT_SIZE),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0)
+
+    # --------------------------------------------------------
+    # CHW -> HWC -> pixels x bands
+    # --------------------------------------------------------
+
+    gt_flat = (
+        gt_tensor
+        .permute(1, 2, 0)
+        .reshape(-1, bands)
+    )
+
+    lr_flat = (
+        lr_tensor
+        .permute(1, 2, 0)
+        .reshape(-1, bands)
+    )
+
+    # --------------------------------------------------------
+    # RWA
+    # --------------------------------------------------------
+
+    RWA_gt, w_gt = rwa(
+        gt_flat,
+        level,
+        1,
+    )
+
+    RWA_lr, w_lr = rwa(
+        lr_flat,
+        level,
+        1,
+    )
+
+    RWA_gt = np.asarray(RWA_gt, dtype=np.float32)
+    RWA_lr = np.asarray(RWA_lr, dtype=np.float32)
+
+    if RWA_gt.shape[1] < COMPACK_BANDS:
+        raise ValueError(
+            f"RWA GT has {RWA_gt.shape[1]} bands; "
+            f"need {COMPACK_BANDS}"
+        )
+
+    if RWA_lr.shape[1] < COMPACK_BANDS:
+        raise ValueError(
+            f"RWA LR has {RWA_lr.shape[1]} bands; "
+            f"need {COMPACK_BANDS}"
+        )
+
+    # --------------------------------------------------------
+    # Compact HF representation
+    # --------------------------------------------------------
+
+    gt_hf = RWA_gt[:, :COMPACK_BANDS]
+    lr_hf = RWA_lr[:, :COMPACK_BANDS]
+
+    # --------------------------------------------------------
+    # SAME PCA PROCEDURE AS Dataset
+    # PCA fitted on LR HF
+    # --------------------------------------------------------
+
+    pca = PCA(
+        n_components=COMPACK_BANDS
+    )
+
+    lr_pca = pca.fit_transform(lr_hf)
+
+    gt_pca = pca.transform(gt_hf)
+
+    # --------------------------------------------------------
+    # First 20 PCA channels
+    # --------------------------------------------------------
+
+    lr20 = lr_pca[:, :PCA_BANDS].reshape(
+        OUT_SIZE,
+        OUT_SIZE,
+        PCA_BANDS,
+    )
+
+    gt20 = gt_pca[:, :PCA_BANDS].reshape(
+        OUT_SIZE,
+        OUT_SIZE,
+        PCA_BANDS,
+    )
+
+    # Remaining 11 PCA channels are required for reconstruction
+    lr_recov = lr_pca[:, PCA_BANDS:COMPACK_BANDS].reshape(
+        OUT_SIZE,
+        OUT_SIZE,
+        COMPACK_BANDS - PCA_BANDS,
+    )
+
+    # --------------------------------------------------------
+    # CHW + /14000
+    # EXACT output expected by training
+    # --------------------------------------------------------
+
+    img_lr_hf = torch.from_numpy(
+        lr20.transpose(2, 0, 1).copy()
+    ).float() / 14000.0
+
+    img_hr_hf = torch.from_numpy(
+        gt20.transpose(2, 0, 1).copy()
+    ).float() / 14000.0
+
+    img_lr_recov = torch.from_numpy(
+        lr_recov.copy()
+    ).float()
+
+    # --------------------------------------------------------
+    # Mask
+    # --------------------------------------------------------
+
+    if mask_path is not None:
+        mask = np.load(mask_path)
+        mask = torch.tensor(
+            mask,
+            dtype=torch.float32,
+        )
+    else:
+        mask = torch.ones(
+            OUT_SIZE,
+            OUT_SIZE,
+            dtype=torch.float32,
+        )
+
+    # --------------------------------------------------------
+    # Edge
+    # --------------------------------------------------------
+
+    if edge_path is not None:
+        edge = np.load(edge_path) * 1.0
+        edge = torch.tensor(
+            edge,
+            dtype=torch.float32,
+        )
+    else:
+        edge = torch.ones(
+            OUT_SIZE,
+            OUT_SIZE,
+            dtype=torch.float32,
+        )
+
+    # --------------------------------------------------------
+    # NaN protection exactly like Dataset
+    # --------------------------------------------------------
+
+    img_lr_hf[
+        torch.isnan(img_lr_hf)
+    ] = 0
+
+    img_hr_hf[
+        torch.isnan(img_hr_hf)
+    ] = 0
+
+    return {
+        "img_lr_hf": img_lr_hf,
+        "img_hr_hf": img_hr_hf,
+        "img_lr_recov": img_lr_recov,
+        "mask": mask,
+        "edge": edge,
+        "w": w_lr,
+    }
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -345,7 +619,7 @@ if __name__ == "__main__":
     print(f"Mask and edge: {config.mask} {config.edge}")
     print(f"L1, L2, L3 lambda: {config.l1_lambda} {config.l2_lambda} {config.l3_lambda}")
     print(f"Sigma Min, Sigma Max, Sigma Data, Rho: {config.sigma_min} {config.sigma_max} {config.sigma_data} {config.rho}")
-    PATH = "/kaggle/working/GEWDiff-BTP/checkpoints/epoch_200.pth"
+    PATH = "/kaggle/working/GEWDiff-BTP/results/fsdp_cfg/cfg_step_0001000.pth"
     #PATH = "/kaggle/working/GEWDiff-BTP/results/best.pth"
 
     checkpoint = torch.load(PATH,map_location=lambda storage, loc: storage.cuda(0), weights_only=False)
@@ -353,7 +627,7 @@ if __name__ == "__main__":
     #model = UNet2DModelWithBN(
         #sample_size=config.out_size,
         #in_channels=config.pca_bands  * 2+1,
-        #out_channels=config.pca_bands ,
+        #out_channels=20,
         #layers_per_block=4,
         #block_out_channels=(128, 128, 256, 256, 512, 512),
         #down_block_types=("DownBlock2D", "DownBlock2D", "DownBlock2D", "DownBlock2D", "AttnDownBlock2D", "DownBlock2D"),
@@ -361,8 +635,8 @@ if __name__ == "__main__":
         #).cuda()
     model = UNet3DWithSpectralFidelity(
         sample_size=config.out_size,
-        in_channels=config.pca_bands * 2+1,
-        out_channels=config.pca_bands ,
+        in_channels=41,
+        out_channels=20,
         norm_type='group',
         layers_per_block=4,
         block_out_channels=(128, 128, 256, 256, 512, 512),
@@ -370,12 +644,11 @@ if __name__ == "__main__":
         up_block_types=("UpBlock3D", "CrossAttnUpBlock3D", "UpBlock3D", "UpBlock3D", "UpBlock3D", "UpBlock3D"),
         ).to("cuda", torch.float32)
     model.load_state_dict(checkpoint['unet_state_dict'], strict=False)
-    diffusion = CFGElucidatedDiffusion(model,image_size=config.out_size, channels=config.pca_bands ,num_sample_steps=config.num_timesteps, l1_lambda=config.l1_lambda, l2_lambda=config.l2_lambda, l3_lambda=config.l3_lambda,
+    diffusion = CFGElucidatedDiffusion(model,image_size=config.out_size, channels=20,num_sample_steps=config.num_timesteps, l1_lambda=config.l1_lambda, l2_lambda=config.l2_lambda, l3_lambda=config.l3_lambda,
         sigma_min=config.sigma_min, sigma_max=config.sigma_max, sigma_data=config.sigma_data, rho=config.rho,p_drop=0.10)
     #diffusion.load_state_dict(checkpoint['gaussian_diff_config'], strict=False)
     diffusion.eval()
     optimizer = torch.optim.Adam(diffusion.parameters(), lr=config.learning_rate)
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     epoch = checkpoint['epoch']
     loss = checkpoint['loss']
     # Move the model to GPU if available
@@ -456,7 +729,7 @@ if __name__ == "__main__":
 
     img_pca[:,:config.pca_bands ]=img_lr_pca_shift.reshape(256*256,config.pca_bands )*14000*std_ratio
     img_pca[:,config.pca_bands :]=img_lr_recov[0].reshape(256*256,config.compack_bands-config.pca_bands )
-    wavelet_sapce = test_dataset.pca_lr.inverse_transform(img_pca.cpu().numpy())
+    wavelet_sapce = test_dataset.pca_lr.inverse_transform(img_pca)
     RWAim[:,0:config.compack_bands] = torch.Tensor(wavelet_sapce)
     #convert dtype
     RWAim = RWAim.to(torch.double)
@@ -468,7 +741,7 @@ if __name__ == "__main__":
     img_hsi = img_hsi.reshape((config.out_size, config.out_size, config.bands))/10000
     data_range = image_gt1.max() - image_gt1.min()
     print(img_hsi.min(),img_hsi.max(),image_gt1.min(),image_gt1.max(),data_range)
-    x_true, x_pred =image_gt1.transpose(1, 2,  0).reshape(256,256,config.bands), img_hsi.cpu().numpy()
+    x_true, x_pred =image_gt1.transpose(1, 2,  0).reshape(256,256,config.bands), img_hsi
     x_pred = np.clip(x_pred, image_gt1.min(), image_gt1.max())
     #data_range = max(x_true.max(), x_pred.max()) - min(x_true.min(), x_pred.min())
     result = quality_assessment(x_true, x_pred, data_range=data_range, ratio=4, multi_dimension=True)
@@ -526,19 +799,22 @@ if __name__ == "__main__":
     #plot histogram
     fig=plt.figure(figsize=(20, 20))
     fig.add_subplot(1, 2, 1)
-    #plt.hist(image_lr[0][1,:,:].cpu().numpy().flatten(), bins=100, alpha=0.7, color='b', label='Low Resolution Image')
-    #plt.hist(image_recon[0][1,:,:].cpu().numpy().flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
-    plt.hist(image_gt[0][1,:,:].cpu().numpy().flatten(), bins=100, alpha=0.7, color='g', label='Ground Truth Image')
-    plt.hist(img_lr_pca_shift[:,:,1].cpu().numpy().flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed PCA')
+    #plt.hist(image_lr[0][1,:,:].flatten(), bins=100, alpha=0.7, color='b', label='Low Resolution Image')
+    #plt.hist(image_recon[0][1,:,:].flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
+    plt.hist(image_gt[0][1,:,:].flatten(), bins=100, alpha=0.7, color='g', label='Ground Truth Image')
+    plt.hist(img_lr_pca_shift[:,:,1].flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed PCA')
     plt.legend()
     plt.title('Histogram of Low Resolution Image, Reconstructed Image and Ground Truth Image')
     fig.add_subplot(1, 2, 2)
-    #plt.hist(image_lr[0][2,:,:].cpu().numpy().flatten(), bins=100, alpha=0.7, color='b', label='Low Resolution Image')
-    #plt.hist(image_recon[0][2,:,:].cpu().numpy().flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
-    plt.hist(image_gt[0][2,:,:].cpu().numpy().flatten(), bins=100, alpha=0.7, color='g', label='Ground Truth Image')
-    plt.hist(img_lr_pca_shift[:,:,2].cpu().numpy().flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
+    #plt.hist(image_lr[0][2,:,:].flatten(), bins=100, alpha=0.7, color='b', label='Low Resolution Image')
+    #plt.hist(image_recon[0][2,:,:].flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
+    plt.hist(image_gt[0][2,:,:].flatten(), bins=100, alpha=0.7, color='g', label='Ground Truth Image')
+    plt.hist(img_lr_pca_shift[:,:,2].flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
     plt.legend()
     plt.title('Histogram of Low Resolution Image, Reconstructed Image and Ground Truth Image')
     plt.show()
     plt.savefig('/kaggle/working/GEWDiff-BTP/results/hist_2.png', format='png')
     print('done',std_ratio)
+
+
+
