@@ -258,7 +258,7 @@ def resize_image_to_quarter(image_np):
     resized_image = zoom(image_np, zoom_factors, order=3)  # Use cubic interpolation
     return resized_image
 class TrainingConfig:
-    def __init__(self, compack_bands=31, pca_bands=20,train_batch_size=2, num_timesteps=500, num_epochs=40, mask=True, edge=True, l1_lambda=0.9, l2_lambda=0.1, l3_lambda=0.01,
+    def __init__(self, compack_bands=121, pca_bands=20,train_batch_size=2, num_timesteps=500, num_epochs=40, mask=True, edge=True, l1_lambda=0.9, l2_lambda=0.1, l3_lambda=0.01,
                  sigma_min=0.0005, sigma_max=80, sigma_data=0.5, rho=3):
         self.compack_bands = compack_bands
         self.pca_bands = pca_bands
@@ -679,13 +679,13 @@ if __name__ == "__main__":
         break
     print(image_lr[0,0,0,0],image_lr.shape,image_gt.shape,img_lr_recov.shape)
     image_lr = image_lr.to("cuda")
-    guidance_scale = 1.0
+    guidance_scale = 2.0
 
     if config.mask & config.edge == False:
         image_recon, images = diffusion.sample_cfg(
             image_lr,
             batch_size=1,
-            num_sample_steps=500,
+            num_sample_steps=50,
             guidance_scale=guidance_scale
         )
 
@@ -693,7 +693,7 @@ if __name__ == "__main__":
         image_recon, images = diffusion.sample_cfg(
             image_lr,
             batch_size=1,
-            num_sample_steps=500,
+            num_sample_steps=50,
             guidance_scale=guidance_scale
         )
 
@@ -702,7 +702,7 @@ if __name__ == "__main__":
             image_lr,
             mask=mask,
             batch_size=1,
-            num_sample_steps=500,
+            num_sample_steps=50,
             guidance_scale=guidance_scale
         )
 
@@ -711,7 +711,7 @@ if __name__ == "__main__":
             image_lr,
             mask=mask,
             batch_size=1,
-            num_sample_steps=500,
+            num_sample_steps=50,
             guidance_scale=guidance_scale
         )
     RWAim = torch.zeros((config.out_size * config.out_size, config.bands))

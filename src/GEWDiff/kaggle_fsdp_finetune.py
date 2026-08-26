@@ -103,14 +103,10 @@ class CFGElucidatedDiffusion(ElucidatedDiffusion):
 
                 img_lr = img_lr.clone()
                 img_lr[drop] = 0
-
+                
                 if mask is not None:
                     mask = mask.clone()
                     mask[drop] = 0
-
-                if edge is not None:
-                    edge = edge.clone()
-                    edge[drop] = 0
 
         return super().forward(
             img_lr,
