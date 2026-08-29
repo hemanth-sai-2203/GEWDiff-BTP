@@ -46,7 +46,7 @@ from kaggle_hf_stream import (
 )
 
 CHECKPOINT = ROOT / "checkpoints" / "epoch_200.pth"
-CFG_RESUME = None
+CFG_RESUME = ROOT / "results" / "fsdp_cfg" / "latest.pth"
 MANIFEST = ROOT / "hf_manifest" / "train_manifest.json"
 OUTPUT = ROOT / "results" / "fsdp_cfg"
 TMP = ROOT / "hf_tmp_fsdp_train"
@@ -198,7 +198,8 @@ def save_checkpoint(
     Save full FSDP model + optimizer state.
 
     Only rank 0 writes the checkpoint.
-    Keep only the latest TWO numbered checkpoints.
+    A single rolling checkpoint is maintained to minimize
+    Kaggle disk usage.
     """
 
     OUTPUT.mkdir(
@@ -250,43 +251,23 @@ def save_checkpoint(
             },
         }
 
-        path = OUTPUT / f"cfg_step_{step:07d}.pth"
+        # ----------------------------------------------------
+        # SINGLE ROLLING CHECKPOINT
+        # ----------------------------------------------------
+
+        path = OUTPUT / "latest.pth"
 
         torch.save(
             payload,
             path,
         )
 
-        # ----------------------------------------------------
-        # KEEP ONLY LATEST TWO NUMBERED CHECKPOINTS
-        # ----------------------------------------------------
-
-        checkpoint_files = sorted(
-            OUTPUT.glob("cfg_step_*.pth"),
-            key=lambda p: int(
-                p.stem.split("_")[-1]
-            ),
-        )
-
-        if len(checkpoint_files) > 2:
-
-            for old_checkpoint in checkpoint_files[:-2]:
-
-                old_checkpoint.unlink()
-
-                print(
-                    f"Deleted old checkpoint: "
-                    f"{old_checkpoint}",
-                    flush=True,
-                )
-
         print(
-            f"Checkpoint saved: {path}",
+            f"Checkpoint saved: {path} | step={step}",
             flush=True,
         )
 
     dist.barrier()
-
 
 def main():
 
