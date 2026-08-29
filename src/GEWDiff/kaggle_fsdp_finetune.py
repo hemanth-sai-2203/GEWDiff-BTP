@@ -15,6 +15,7 @@ from torch.distributed.fsdp import (
     MixedPrecision,
     StateDictType,
     FullStateDictConfig,
+    FullOptimStateDictConfig,
 )
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
@@ -227,10 +228,21 @@ def save_checkpoint(
     # FULL OPTIMIZER STATE
     # --------------------------------------------------------
 
-    full_optimizer_state = FSDP.optim_state_dict(
-        model,
-        optimizer,
+    optim_state_cfg = FullOptimStateDictConfig(
+        offload_to_cpu=True,
+        rank0_only=True,
     )
+
+    with FSDP.state_dict_type(
+        model,
+        StateDictType.FULL_STATE_DICT,
+        model_state_cfg,
+        optim_state_cfg,
+    ):
+        full_optimizer_state = FSDP.optim_state_dict(
+            model,
+            optimizer,
+        )
 
     if dist.get_rank() == 0:
 
