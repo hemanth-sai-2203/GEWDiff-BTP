@@ -47,12 +47,12 @@ from kaggle_hf_stream import (
 )
 
 CHECKPOINT = ROOT / "checkpoints" / "epoch_200.pth"
-CFG_RESUME = ROOT / "results" / "fsdp_cfg" / "cfg_step_0000800.pth"
+CFG_RESUME = ROOT / "results" / "fsdp_cfg" / "cfg_step_0001000.pth"
 MANIFEST = ROOT / "hf_manifest" / "train_manifest.json"
 OUTPUT = ROOT / "results" / "fsdp_cfg"
 TMP = ROOT / "hf_tmp_fsdp_train"
 
-MAX_STEPS = int(os.environ.get("GEW_MAX_STEPS", "1000"))
+MAX_STEPS = int(os.environ.get("GEW_MAX_STEPS", "4000"))
 SAVE_EVERY = int(os.environ.get("GEW_SAVE_EVERY", "100"))
 LR = float(os.environ.get("GEW_LR", "1e-5"))
 P_DROP = 0.10
@@ -255,6 +255,18 @@ def save_checkpoint(
             payload,
             OUTPUT / "latest.pth",
         )
+
+        # Keep only the latest TWO numbered checkpoints.
+        checkpoint_files = sorted(
+            OUTPUT.glob("cfg_step_*.pth"),
+            key=lambda p: int(
+                p.stem.split("_")[-1]
+            ),
+        )
+
+        if len(checkpoint_files) > 2:
+            for old_checkpoint in checkpoint_files[:-2]:
+                old_checkpoint.unlink()
 
         print(
             f"Checkpoint saved: {path}",
