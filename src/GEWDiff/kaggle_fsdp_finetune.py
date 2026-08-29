@@ -16,7 +16,6 @@ from torch.distributed.fsdp import (
     StateDictType,
     FullStateDictConfig,
 )
-
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
     CheckpointImpl,
@@ -47,7 +46,7 @@ from kaggle_hf_stream import (
 )
 
 CHECKPOINT = ROOT / "checkpoints" / "epoch_200.pth"
-CFG_RESUME = ROOT / "results" / "fsdp_cfg" / "cfg_step_0001000.pth"
+CFG_RESUME = None
 MANIFEST = ROOT / "hf_manifest" / "train_manifest.json"
 OUTPUT = ROOT / "results" / "fsdp_cfg"
 TMP = ROOT / "hf_tmp_fsdp_train"
@@ -196,11 +195,10 @@ def save_checkpoint(
     last_loss,
 ):
     """
-    Save a full CPU-offloaded model checkpoint from FSDP.
+    Save full FSDP model + optimizer state.
 
-    This uses the PyTorch FSDP StateDict API compatible with
-    the installed runtime instead of the nonexistent
-    FSDP.full_state_dict() method.
+    Only rank 0 writes the checkpoint.
+    Keep only the latest TWO numbered checkpoints.
     """
 
     OUTPUT.mkdir(
@@ -209,12 +207,10 @@ def save_checkpoint(
     )
 
     # --------------------------------------------------------
-    # Gather full model weights only on rank 0.
-    # CPU offload prevents the gathered checkpoint from
-    # unnecessarily occupying GPU memory.
+    # FULL MODEL STATE
     # --------------------------------------------------------
 
-    state_cfg = FullStateDictConfig(
+    model_state_cfg = FullStateDictConfig(
         offload_to_cpu=True,
         rank0_only=True,
     )
@@ -222,14 +218,24 @@ def save_checkpoint(
     with FSDP.state_dict_type(
         model,
         StateDictType.FULL_STATE_DICT,
-        state_cfg,
+        model_state_cfg,
     ):
-        full_state = model.state_dict()
+        full_model_state = model.state_dict()
+
+    # --------------------------------------------------------
+    # FULL OPTIMIZER STATE
+    # --------------------------------------------------------
+
+    full_optimizer_state = FSDP.optim_state_dict(
+        model,
+        optimizer,
+    )
 
     if dist.get_rank() == 0:
 
         payload = {
-            "unet_state_dict": full_state,
+            "unet_state_dict": full_model_state,
+            "optimizer_state_dict": full_optimizer_state,
             "epoch": 0,
             "step": int(step),
             "loss": float(last_loss),
@@ -251,12 +257,10 @@ def save_checkpoint(
             path,
         )
 
-        torch.save(
-            payload,
-            OUTPUT / "latest.pth",
-        )
+        # ----------------------------------------------------
+        # KEEP ONLY LATEST TWO NUMBERED CHECKPOINTS
+        # ----------------------------------------------------
 
-        # Keep only the latest TWO numbered checkpoints.
         checkpoint_files = sorted(
             OUTPUT.glob("cfg_step_*.pth"),
             key=lambda p: int(
@@ -265,8 +269,16 @@ def save_checkpoint(
         )
 
         if len(checkpoint_files) > 2:
+
             for old_checkpoint in checkpoint_files[:-2]:
+
                 old_checkpoint.unlink()
+
+                print(
+                    f"Deleted old checkpoint: "
+                    f"{old_checkpoint}",
+                    flush=True,
+                )
 
         print(
             f"Checkpoint saved: {path}",
@@ -306,7 +318,7 @@ def main():
 
     resume_step = 0
 
-    if CFG_RESUME.exists():
+    if CFG_RESUME is not None and CFG_RESUME.exists():
         checkpoint = torch.load(
             CFG_RESUME,
             map_location="cpu",
@@ -344,8 +356,6 @@ def main():
             f"unexpected={len(unexpected)}"
         )
 
-    del checkpoint
-    gc.collect()
 
     # --------------------------------------------------------
     # FSDP
@@ -410,6 +420,42 @@ def main():
         lr=LR,
         weight_decay=0.001,
     )
+
+    # --------------------------------------------------------
+    # RESTORE OPTIMIZER STATE WHEN RESUMING CFG CHECKPOINT
+    # --------------------------------------------------------
+
+    if resume_step > 0:
+
+        optimizer_state_dict = checkpoint.get(
+            "optimizer_state_dict"
+        )
+
+        if optimizer_state_dict is None:
+            raise RuntimeError(
+                "CFG checkpoint has no optimizer_state_dict."
+            )
+
+        optimizer_state_dict = (
+            FSDP.optim_state_dict_to_load(
+                model,
+                optimizer,
+                optimizer_state_dict,
+            )
+        )
+
+        optimizer.load_state_dict(
+            optimizer_state_dict
+        )
+
+        log(
+            rank,
+            f"Optimizer state restored | step={resume_step}",
+        )
+
+    # Checkpoint is no longer needed after model/optimizer restore.
+    del checkpoint
+    gc.collect()
 
     # --------------------------------------------------------
     # DATA
