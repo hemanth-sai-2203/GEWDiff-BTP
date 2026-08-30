@@ -346,18 +346,6 @@ def main():
             f"Base checkpoint loaded | epoch={checkpoint.get('epoch')}",
         )
 
-    missing, unexpected = model.load_state_dict(
-        checkpoint["unet_state_dict"],
-        strict=False,
-    )
-
-    if missing or unexpected:
-        raise RuntimeError(
-            f"Checkpoint mismatch: "
-            f"missing={len(missing)}, "
-            f"unexpected={len(unexpected)}"
-        )
-
 
     # --------------------------------------------------------
     # FSDP
@@ -395,6 +383,21 @@ def main():
     )
 
     log(rank, "FSDP FULL_SHARD ready")
+    # --------------------------------------------------------
+    # RESTORE FSDP UNET MODEL STATE
+    # --------------------------------------------------------
+    
+    missing, unexpected = model.load_state_dict(
+        checkpoint["unet_state_dict"],
+        strict=False,
+    )
+
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Checkpoint mismatch: "
+            f"missing={len(missing)}, "
+            f"unexpected={len(unexpected)}"
+        )
 
     # --------------------------------------------------------
     # DIFFUSION
