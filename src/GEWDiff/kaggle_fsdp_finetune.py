@@ -530,6 +530,24 @@ def main():
         optimizer,
     )
 
+    if os.environ.get("GEW_CHECKPOINT_TEST") == "1":
+        log(rank, "CHECKPOINT SERIALIZATION TEST START")
+
+        save_checkpoint(
+            model,
+            optimizer,
+            diffusion,
+            perceptual_optimizer,
+            0,
+            0.0,
+        )
+
+        log(rank, "CHECKPOINT SERIALIZATION TEST PASSED")
+
+        dist.barrier()
+        cleanup()
+        return
+
     log(
         rank,
         f"UNet optimizer parameters: "
