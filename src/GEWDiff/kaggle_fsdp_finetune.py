@@ -411,7 +411,11 @@ def main():
         l2_lambda=0.1,
         l3_lambda=0.1,
         p_drop=P_DROP,
-    ).to(device)
+    )
+
+    # The FSDP-wrapped UNet is already on its CUDA device.
+    # Move only the non-FSDP perceptual module.
+    diffusion.perceptual_loss.to(device)
 
     diffusion.train()
 
