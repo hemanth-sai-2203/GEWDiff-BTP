@@ -427,11 +427,7 @@ def main():
     ]
 
     optimizer = torch.optim.AdamW(
-        (
-            param
-            for param in diffusion.parameters()
-            if param.requires_grad
-        ),
+        trainable_params,
         lr=LR,
         weight_decay=0.001,
     )
