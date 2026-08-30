@@ -15,7 +15,6 @@ from torch.distributed.fsdp import (
     MixedPrecision,
     StateDictType,
     FullStateDictConfig,
-    FullOptimStateDictConfig,
 )
 
 
@@ -204,32 +203,30 @@ def save_checkpoint(
         exist_ok=True,
     )
 
+    # --------------------------------------------------------
+    # FSDP UNET MODEL STATE
+    # --------------------------------------------------------
+
     model_state_cfg = FullStateDictConfig(
         offload_to_cpu=True,
         rank0_only=True,
     )
 
-    optim_state_cfg = FullOptimStateDictConfig(
-        offload_to_cpu=True,
-        rank0_only=True,
-    )
-
-    # --------------------------------------------------------
-    # FSDP UNET MODEL + OPTIMIZER
-    # --------------------------------------------------------
-
     with FSDP.state_dict_type(
         model,
         StateDictType.FULL_STATE_DICT,
         model_state_cfg,
-        optim_state_cfg,
     ):
         full_model_state = model.state_dict()
 
-        full_optimizer_state = FSDP.optim_state_dict(
-            model,
-            optimizer,
-        )
+    # --------------------------------------------------------
+    # FSDP UNET OPTIMIZER STATE
+    # --------------------------------------------------------
+
+    full_optimizer_state = FSDP.optim_state_dict(
+        model,
+        optimizer,
+    )
 
     # --------------------------------------------------------
     # NON-FSDP CONV_ADJUST
@@ -244,6 +241,10 @@ def save_checkpoint(
     perceptual_optimizer_state = (
         perceptual_optimizer.state_dict()
     )
+
+    # --------------------------------------------------------
+    # SAVE ONLY ON RANK 0
+    # --------------------------------------------------------
 
     if dist.get_rank() == 0:
 
@@ -270,11 +271,8 @@ def save_checkpoint(
         }
 
         path = OUTPUT / "latest.pth"
-
         tmp_path = OUTPUT / "latest.tmp.pth"
 
-        # Write atomically so a failed save cannot leave a
-        # corrupted latest.pth.
         torch.save(
             payload,
             tmp_path,
