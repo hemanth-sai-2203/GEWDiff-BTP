@@ -15,7 +15,6 @@ from torch.distributed.fsdp import (
     MixedPrecision,
     StateDictType,
     FullStateDictConfig,
-    FullOptimStateDictConfig,
 )
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
@@ -431,6 +430,13 @@ def main():
     # belonging to the FSDP-wrapped model.
     # --------------------------------------------------------
 
+# --------------------------------------------------------
+# OPTIMIZERS
+# --------------------------------------------------------
+
+# FSDP-managed UNet parameters ONLY.
+# The optimizer must not contain parameters belonging to
+# modules outside the FSDP-wrapped UNet.
     unet_trainable_params = [
         param
         for param in model.parameters()
@@ -443,9 +449,11 @@ def main():
         weight_decay=0.001,
     )
 
+    # conv_adjust is outside FSDP and therefore has its own
+    # ordinary optimizer.
     conv_adjust_params = [
         param
-        for param in diffusion.perceptual_loss.parameters()
+        for param in diffusion.perceptual_loss.conv_adjust.parameters()
         if param.requires_grad
     ]
 
@@ -645,9 +653,8 @@ def main():
                     == (1, 20, 256, 256)
                 )
 
-                optimizer.zero_grad(
-                    set_to_none=True
-                )
+                optimizer.zero_grad(set_to_none=True)
+                perceptual_optimizer.zero_grad(set_to_none=True)
 
                 # ------------------------------------------------
                 # FORWARD
@@ -683,7 +690,7 @@ def main():
                 )
 
                 optimizer.step()
-
+                perceptual_optimizer.step()
                 step += 1
 
                 # ------------------------------------------------
