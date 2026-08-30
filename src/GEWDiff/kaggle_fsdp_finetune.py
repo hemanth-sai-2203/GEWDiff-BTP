@@ -405,13 +405,40 @@ def main():
     diffusion.train()
 
     # --------------------------------------------------------
+    # FREEZE PRETRAINED VGG FEATURE EXTRACTOR
+    # --------------------------------------------------------
+
+    for param in diffusion.perceptual_loss.feature_layers.parameters():
+        param.requires_grad = False
+
+    log(
+        rank,
+        "Pretrained VGG feature extractor frozen"
+    )
+
+    # --------------------------------------------------------
     # OPTIMIZER
     # --------------------------------------------------------
 
+    trainable_params = [
+        param
+        for param in diffusion.parameters()
+        if param.requires_grad
+    ]
+
     optimizer = torch.optim.AdamW(
-        diffusion.parameters(),
+        (
+            param
+            for param in diffusion.parameters()
+            if param.requires_grad
+        ),
         lr=LR,
         weight_decay=0.001,
+    )
+
+    log(
+        rank,
+        f"Optimizer parameters: {sum(p.numel() for p in trainable_params):,}"
     )
 
     # --------------------------------------------------------
