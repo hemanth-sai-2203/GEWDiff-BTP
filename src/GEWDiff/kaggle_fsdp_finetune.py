@@ -290,6 +290,51 @@ def save_checkpoint(
 
     dist.barrier()
 
+def validate_fsdp_optimizer_parameters(model, optimizer):
+
+
+    fsdp_params = {
+        id(param): name
+        for name, param in model.named_parameters()
+    }
+
+    optimizer_params = [
+        param
+        for group in optimizer.param_groups
+        for param in group["params"]
+    ]
+
+    invalid = [
+        param
+        for param in optimizer_params
+        if id(param) not in fsdp_params
+    ]
+
+    if invalid:
+        details = []
+
+        for param in invalid:
+            details.append(
+                {
+                    "shape": tuple(param.shape),
+                    "requires_grad": param.requires_grad,
+                    "id": id(param),
+                }
+            )
+
+        raise RuntimeError(
+            "FSDP optimizer contains parameters that are not "
+            "owned by the FSDP model. "
+            f"Invalid parameter count: {len(invalid)}. "
+            f"Details: {details[:10]}"
+        )
+
+    log(
+        dist.get_rank(),
+        f"FSDP optimizer parameter validation passed | "
+        f"{len(optimizer_params)} parameters",
+    )
+
 def main():
 
     rank, local_rank, device = setup()
@@ -478,6 +523,11 @@ def main():
         conv_adjust_params,
         lr=LR,
         weight_decay=0.001,
+    )
+
+    validate_fsdp_optimizer_parameters(
+        model,
+        optimizer,
     )
 
     log(
