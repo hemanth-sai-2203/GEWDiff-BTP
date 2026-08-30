@@ -417,24 +417,54 @@ def main():
     )
 
     # --------------------------------------------------------
-    # OPTIMIZER
+    # OPTIMIZERS
+    # --------------------------------------------------------
+    #
+    # FSDP optimizer:
+    #   Only parameters belonging to the FSDP-wrapped UNet.
+    #
+    # Perceptual optimizer:
+    #   Only the trainable conv_adjust layer, which is outside FSDP.
+    #
+    # Keeping them separate is required because
+    # FSDP.optim_state_dict() can only process parameters
+    # belonging to the FSDP-wrapped model.
     # --------------------------------------------------------
 
-    trainable_params = [
+    unet_trainable_params = [
         param
-        for param in diffusion.parameters()
+        for param in model.parameters()
         if param.requires_grad
     ]
 
     optimizer = torch.optim.AdamW(
-        trainable_params,
+        unet_trainable_params,
+        lr=LR,
+        weight_decay=0.001,
+    )
+
+    conv_adjust_params = [
+        param
+        for param in diffusion.perceptual_loss.parameters()
+        if param.requires_grad
+    ]
+
+    perceptual_optimizer = torch.optim.AdamW(
+        conv_adjust_params,
         lr=LR,
         weight_decay=0.001,
     )
 
     log(
         rank,
-        f"Optimizer parameters: {sum(p.numel() for p in trainable_params):,}"
+        f"UNet optimizer parameters: "
+        f"{sum(p.numel() for p in unet_trainable_params):,}"
+    )
+
+    log(
+        rank,
+        f"Perceptual optimizer parameters: "
+        f"{sum(p.numel() for p in conv_adjust_params):,}"
     )
 
     # --------------------------------------------------------
