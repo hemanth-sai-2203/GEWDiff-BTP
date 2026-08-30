@@ -15,7 +15,10 @@ from torch.distributed.fsdp import (
     MixedPrecision,
     StateDictType,
     FullStateDictConfig,
+    FullOptimStateDictConfig,
 )
+
+
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
     CheckpointImpl,
@@ -191,46 +194,29 @@ def build_model():
 def save_checkpoint(
     model,
     optimizer,
+    diffusion,
+    perceptual_optimizer,
     step,
     last_loss,
 ):
-    """
-    Save full FSDP model + optimizer state.
-
-    Only rank 0 writes the checkpoint.
-    A single rolling checkpoint is maintained to minimize
-    Kaggle disk usage.
-    """
-
     OUTPUT.mkdir(
         parents=True,
         exist_ok=True,
     )
-
-    # --------------------------------------------------------
-    # FULL MODEL STATE
-    # --------------------------------------------------------
 
     model_state_cfg = FullStateDictConfig(
         offload_to_cpu=True,
         rank0_only=True,
     )
 
-    with FSDP.state_dict_type(
-        model,
-        StateDictType.FULL_STATE_DICT,
-        model_state_cfg,
-    ):
-        full_model_state = model.state_dict()
-
-    # --------------------------------------------------------
-    # FULL OPTIMIZER STATE
-    # --------------------------------------------------------
-
     optim_state_cfg = FullOptimStateDictConfig(
         offload_to_cpu=True,
         rank0_only=True,
     )
+
+    # --------------------------------------------------------
+    # FSDP UNET MODEL + OPTIMIZER
+    # --------------------------------------------------------
 
     with FSDP.state_dict_type(
         model,
@@ -238,19 +224,40 @@ def save_checkpoint(
         model_state_cfg,
         optim_state_cfg,
     ):
+        full_model_state = model.state_dict()
+
         full_optimizer_state = FSDP.optim_state_dict(
             model,
             optimizer,
         )
 
+    # --------------------------------------------------------
+    # NON-FSDP CONV_ADJUST
+    # --------------------------------------------------------
+
+    conv_adjust_state = {
+        key: value.detach().cpu().clone()
+        for key, value
+        in diffusion.perceptual_loss.conv_adjust.state_dict().items()
+    }
+
+    perceptual_optimizer_state = (
+        perceptual_optimizer.state_dict()
+    )
+
     if dist.get_rank() == 0:
 
         payload = {
             "unet_state_dict": full_model_state,
-            "optimizer_state_dict": full_optimizer_state,
-            "epoch": 0,
+            "unet_optimizer_state_dict": full_optimizer_state,
+
+            "conv_adjust_state_dict": conv_adjust_state,
+            "conv_adjust_optimizer_state_dict":
+                perceptual_optimizer_state,
+
             "step": int(step),
             "loss": float(last_loss),
+
             "cfg": {
                 "p_drop": P_DROP,
                 "lr": LR,
@@ -262,14 +269,19 @@ def save_checkpoint(
             },
         }
 
-        # ----------------------------------------------------
-        # SINGLE ROLLING CHECKPOINT
-        # ----------------------------------------------------
-
         path = OUTPUT / "latest.pth"
 
+        tmp_path = OUTPUT / "latest.tmp.pth"
+
+        # Write atomically so a failed save cannot leave a
+        # corrupted latest.pth.
         torch.save(
             payload,
+            tmp_path,
+        )
+
+        os.replace(
+            tmp_path,
             path,
         )
 
@@ -481,31 +493,68 @@ def main():
 
     if resume_step > 0:
 
-        optimizer_state_dict = checkpoint.get(
-            "optimizer_state_dict"
+        unet_optimizer_state = checkpoint.get(
+            "unet_optimizer_state_dict"
         )
 
-        if optimizer_state_dict is None:
+        conv_adjust_state = checkpoint.get(
+            "conv_adjust_state_dict"
+        )
+
+        conv_adjust_optimizer_state = checkpoint.get(
+            "conv_adjust_optimizer_state_dict"
+        )
+
+        if (
+            unet_optimizer_state is None
+            or conv_adjust_state is None
+            or conv_adjust_optimizer_state is None
+        ):
             raise RuntimeError(
-                "CFG checkpoint has no optimizer_state_dict."
+                "CFG checkpoint is incomplete: "
+                "expected UNet optimizer, conv_adjust, "
+                "and conv_adjust optimizer states."
             )
 
-        optimizer_state_dict = (
+        # --------------------------------------------------------
+        # RESTORE FSDP UNET OPTIMIZER
+        # --------------------------------------------------------
+
+        unet_optimizer_state = (
             FSDP.optim_state_dict_to_load(
                 model,
                 optimizer,
-                optimizer_state_dict,
+                unet_optimizer_state,
             )
         )
 
         optimizer.load_state_dict(
-            optimizer_state_dict
+            unet_optimizer_state
+        )
+
+        # --------------------------------------------------------
+        # RESTORE CONV_ADJUST
+        # --------------------------------------------------------
+
+        diffusion.perceptual_loss.conv_adjust.load_state_dict(
+            conv_adjust_state
+        )
+
+        # --------------------------------------------------------
+        # RESTORE CONV_ADJUST OPTIMIZER
+        # --------------------------------------------------------
+
+        perceptual_optimizer.load_state_dict(
+            conv_adjust_optimizer_state
         )
 
         log(
             rank,
-            f"Optimizer state restored | step={resume_step}",
+            f"Both optimizer states + conv_adjust restored "
+            f"| step={resume_step}",
         )
+
+
 
     # Checkpoint is no longer needed after model/optimizer restore.
     del checkpoint
@@ -744,6 +793,8 @@ def main():
                     save_checkpoint(
                         model,
                         optimizer,
+                        diffusion,
+                        perceptual_optimizer,
                         step,
                         loss.detach(),
                     )
