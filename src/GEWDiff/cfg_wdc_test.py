@@ -622,7 +622,13 @@ if __name__ == "__main__":
     PATH = "/kaggle/working/GEWDiff-BTP/results/fsdp_cfg/cfg_step_0001000.pth"
     #PATH = "/kaggle/working/GEWDiff-BTP/results/best.pth"
 
-    checkpoint = torch.load(PATH,map_location=lambda storage, loc: storage.cuda(0), weights_only=False)
+    PATH = "/kaggle/working/GEWDiff-BTP/results/fsdp_cfg/latest.pth"
+
+    checkpoint = torch.load(
+        PATH,
+        map_location=lambda storage, loc: storage.cuda(0),
+        weights_only=False,
+    )
 
     #model = UNet2DModelWithBN(
         #sample_size=config.out_size,
