@@ -397,9 +397,9 @@ def main():
     # --------------------------------------------------------
 
     mixed_precision = MixedPrecision(
-        param_dtype=torch.float16,
-        reduce_dtype=torch.float16,
-        buffer_dtype=torch.float16,
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.bfloat16,
+        buffer_dtype=torch.bfloat16,
     )
 
     # --------------------------------------------------------
