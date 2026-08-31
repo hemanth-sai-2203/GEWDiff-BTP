@@ -649,8 +649,8 @@ if __name__ == "__main__":
     #diffusion.load_state_dict(checkpoint['gaussian_diff_config'], strict=False)
     diffusion.eval()
     optimizer = torch.optim.Adam(diffusion.parameters(), lr=config.learning_rate)
-    epoch = checkpoint['epoch']
-    loss = checkpoint['loss']
+    epoch = checkpoint.get('epoch', None)
+    loss = checkpoint.get('loss', None)
     # Move the model to GPU if available
     diffusion = diffusion.cuda()
     diffusion.eval()
