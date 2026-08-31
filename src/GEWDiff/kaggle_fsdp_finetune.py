@@ -764,17 +764,14 @@ def main():
                 # FORWARD
                 # ------------------------------------------------
 
-                with torch.autocast(
-                    device_type="cuda",
-                    dtype=torch.float16,
-                ):
 
-                    loss, loss1, loss2, loss3 = diffusion(
-                        lr,
-                        hr,
-                        mask,
-                        edge,
-                    )
+
+                loss, loss1, loss2, loss3 = diffusion(
+                    lr,
+                    hr,
+                    mask,
+                    edge,
+                )
 
                 if not torch.isfinite(loss):
                     raise RuntimeError(
