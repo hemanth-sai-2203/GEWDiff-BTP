@@ -46,6 +46,7 @@ P_DROP = 0.10
 # Fine-tuning default is deliberately configurable.
 LR = float(os.environ.get("GEW_FINETUNE_LR", "1e-5"))
 MAX_STEPS = int(os.environ.get("GEW_MAX_STEPS", "1000"))
+RESUME = os.environ.get("GEW_RESUME", "")
 SAVE_EVERY = int(os.environ.get("GEW_SAVE_EVERY", "100"))
 SEED = 42
 
@@ -235,10 +236,10 @@ def save_checkpoint(
     output_dir,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
-
     state = {
         "unet_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "scaler_state_dict": scaler.state_dict(),
         "epoch": epoch,
         "step": step,
         "loss": float(last_loss),
@@ -252,7 +253,6 @@ def save_checkpoint(
             "lr": LR,
         },
     }
-
     path = output_dir / f"cfg_step_{step:07d}.pth"
 
     torch.save(
@@ -504,7 +504,37 @@ def train():
 
     model = build_model()
 
-    checkpoint = load_base_checkpoint(model)
+    if RESUME:
+        resume_path = Path(RESUME)
+
+        if not resume_path.exists():
+            raise FileNotFoundError(
+                f"Resume checkpoint not found: {resume_path}"
+            )
+
+        checkpoint = torch.load(
+            resume_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        missing, unexpected = model.load_state_dict(
+            checkpoint["unet_state_dict"],
+            strict=False,
+        )
+
+        if missing or unexpected:
+            raise RuntimeError(
+                "Resume checkpoint mismatch.\n"
+                f"Missing: {len(missing)}\n"
+                f"Unexpected: {len(unexpected)}"
+            )
+
+        print(
+            f"Resuming from checkpoint: {resume_path}"
+        )
+    else:
+        checkpoint = load_base_checkpoint(model)
 
     model = model.to(device)
 
@@ -518,7 +548,10 @@ def train():
         weight_decay=0.001,
     )
 
-    scaler = torch.amp.GradScaler("cuda", init_scale=128.0)
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        init_scale=128.0,
+    )
 
     if world_size > 1:
         diffusion = DDP(
@@ -530,8 +563,27 @@ def train():
 
     print_rank = rank == 0
 
-    step = 0
-    start_epoch = 0
+    if RESUME:
+        optimizer.load_state_dict(
+            checkpoint["optimizer_state_dict"]
+        )
+
+        if "scaler_state_dict" in checkpoint:
+            scaler.load_state_dict(
+                checkpoint["scaler_state_dict"]
+            )
+
+        step = int(checkpoint["step"])
+        start_epoch = int(checkpoint["epoch"])
+
+        if print_rank:
+            print(
+                f"Resumed at step={step}, "
+                f"start_epoch={start_epoch}"
+            )
+    else:
+        step = 0
+        start_epoch = 0
 
     total_per_epoch = (
         len(manifest) + world_size - 1
