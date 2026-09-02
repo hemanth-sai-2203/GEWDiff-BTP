@@ -13,12 +13,12 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from model.edm import (
+from .model.edm import (
     ElucidatedDiffusion,
     UNet3DWithSpectralFidelity,
 )
 
-from kaggle_hf_stream import (
+from .kaggle_hf_stream import (
     HF_REPO,
     OUT_SIZE,
     PCA_BANDS,
@@ -393,9 +393,7 @@ def smoke_test():
         weight_decay=0.001,
     )
 
-    scaler = torch.amp.GradScaler(
-        "cuda",
-    )
+
 
     optimizer.zero_grad(
         set_to_none=True,
@@ -426,16 +424,39 @@ def smoke_test():
     print("Perceptual:", float(loss2.detach()))
     print("Gradient:", float(loss3.detach()))
 
-    print("\nRunning backward...")
+    print("\nRunning scaled FP16 backward...")
+
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        init_scale=128.0,
+    )
 
     scaler.scale(total_loss).backward()
 
     scaler.unscale_(optimizer)
 
+    bad_grads = []
+
+    for name, param in diffusion.named_parameters():
+        if param.grad is not None:
+            if not torch.isfinite(param.grad).all():
+                bad_grads.append(name)
+
+    if bad_grads:
+        print("\nNON-FINITE GRADIENTS:")
+        for name in bad_grads[:30]:
+            print("  ", name)
+        print("Total bad parameters:", len(bad_grads))
+        raise RuntimeError(
+            "GradScaler backward produced non-finite gradients"
+        )
+
     grad_norm = torch.nn.utils.clip_grad_norm_(
         diffusion.parameters(),
         1.0,
     )
+
+    print("Scaled FP16 gradient norm:", float(grad_norm))
 
     if not torch.isfinite(grad_norm):
         raise RuntimeError(
@@ -444,7 +465,6 @@ def smoke_test():
 
     scaler.step(optimizer)
     scaler.update()
-
     peak_vram = (
         torch.cuda.max_memory_allocated()
         / (1024 ** 3)
@@ -498,9 +518,7 @@ def train():
         weight_decay=0.001,
     )
 
-    scaler = torch.amp.GradScaler(
-        "cuda",
-    )
+    scaler = torch.amp.GradScaler("cuda", init_scale=128.0)
 
     if world_size > 1:
         diffusion = DDP(

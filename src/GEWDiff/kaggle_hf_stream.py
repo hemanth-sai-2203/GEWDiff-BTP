@@ -17,7 +17,7 @@ from scipy.ndimage import zoom
 
 from huggingface_hub import HfApi, hf_hub_url
 
-from model.RWT import rwa
+from .model.RWT import rwa
 
 
 HF_REPO = "zhu-xlab/GEWDiff_training_dataset"
