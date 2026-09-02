@@ -425,7 +425,7 @@ def smoke_test():
 
     # T4-safe AdamW:
     # same AdamW optimization rule, 8-bit optimizer states.
-    optimizer = bnb.optim.AdamW8bit(
+    optimizer = torch.optim.AdamW(
         diffusion.parameters(),
         lr=LR,
         weight_decay=0.001,
