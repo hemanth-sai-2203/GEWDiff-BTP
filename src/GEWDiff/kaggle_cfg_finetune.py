@@ -12,6 +12,7 @@ import bitsandbytes as bnb
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from concurrent.futures import ThreadPoolExecutor
 
 from .model.edm import (
     ElucidatedDiffusion,
@@ -188,6 +189,36 @@ def make_sample(record, temp_dir):
         record,
         temp_dir,
     )
+PREFETCH_SIZE = 5
+
+
+def prefetch_sample(record, temp_dir):
+    fetch_start = time.perf_counter()
+
+    try:
+        sample = make_sample(
+            record,
+            temp_dir,
+        )
+
+        fetch_time = time.perf_counter() - fetch_start
+
+        return {
+            "ok": True,
+            "sample": sample,
+            "fetch_time": fetch_time,
+            "error": None,
+        }
+
+    except Exception as exc:
+        fetch_time = time.perf_counter() - fetch_start
+
+        return {
+            "ok": False,
+            "sample": None,
+            "fetch_time": fetch_time,
+            "error": repr(exc),
+        }
 
 
 def prepare_batch(sample, device):
@@ -228,6 +259,7 @@ def prepare_batch(sample, device):
 
 def save_checkpoint(
     model,
+    diffusion,
     optimizer,
     scaler,
     epoch,
@@ -236,13 +268,18 @@ def save_checkpoint(
     output_dir,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
+
     state = {
+        # Original GEWDiff checkpoint fields
         "unet_state_dict": model.state_dict(),
+        "gaussian_diff_config": diffusion.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-        "scaler_state_dict": scaler.state_dict(),
         "epoch": epoch,
-        "step": step,
         "loss": float(last_loss),
+
+        # CFG-specific fields
+        "scaler_state_dict": scaler.state_dict(),
+        "step": step,
         "cfg": {
             "p_drop": P_DROP,
             "compact_bands": COMPACT_BANDS,
@@ -253,6 +290,7 @@ def save_checkpoint(
             "lr": LR,
         },
     }
+
     path = output_dir / f"cfg_step_{step:07d}.pth"
 
     torch.save(
@@ -612,18 +650,104 @@ def train():
             rank::world_size
         ]
 
-        for idx in local_order:
+        local_indices = list(local_order)
 
-            if step >= MAX_STEPS:
-                break
+        with ThreadPoolExecutor(
+            max_workers=PREFETCH_SIZE
+        ) as executor:
 
-            record = manifest[int(idx)]
+            futures = []
 
-            try:
-                sample = make_sample(
-                    record,
-                    TMP_DIR / f"rank_{rank}",
+            # --------------------------------------------------
+            # Initial prefetch
+            # --------------------------------------------------
+
+            initial_count = min(
+                PREFETCH_SIZE,
+                len(local_indices),
+            )
+
+            for i in range(initial_count):
+
+                record = manifest[
+                    int(local_indices[i])
+                ]
+
+                futures.append(
+                    executor.submit(
+                        prefetch_sample,
+                        record,
+                        TMP_DIR
+                        / f"rank_{rank}"
+                        / f"prefetch_{i}",
+                    )
                 )
+
+            # --------------------------------------------------
+            # Training + rolling prefetch
+            # --------------------------------------------------
+
+            for i, idx in enumerate(local_indices):
+
+                if step >= MAX_STEPS:
+                    break
+
+                record = manifest[int(idx)]
+
+                wait_start = time.perf_counter()
+
+                result = futures.pop(0).result()
+
+                wait_time = (
+                    time.perf_counter()
+                    - wait_start
+                )
+
+                # --------------------------------------------------
+                # Immediately submit the next sample
+                # --------------------------------------------------
+
+                next_i = i + PREFETCH_SIZE
+
+                if next_i < len(local_indices):
+
+                    next_record = manifest[
+                        int(local_indices[next_i])
+                    ]
+
+                    futures.append(
+                        executor.submit(
+                            prefetch_sample,
+                            next_record,
+                            TMP_DIR
+                            / f"rank_{rank}"
+                            / f"prefetch_{next_i}",
+                        )
+                    )
+
+                # --------------------------------------------------
+                # Handle failed dataset sample
+                # --------------------------------------------------
+
+                if not result["ok"]:
+
+                    if print_rank:
+                        print(
+                            f"[SKIP] sample={i} "
+                            f"path={record['gt']} "
+                            f"fetch_time={result['fetch_time']:.2f}s "
+                            f"wait_time={wait_time:.2f}s "
+                            f"error={result['error']}"
+                        )
+
+                    continue
+
+                sample = result["sample"]
+                fetch_time = result["fetch_time"]
+
+                # --------------------------------------------------
+                # Prepare batch
+                # --------------------------------------------------
 
                 lr, hr, mask, edge = prepare_batch(
                     sample,
@@ -634,10 +758,15 @@ def train():
                     set_to_none=True
                 )
 
+                # --------------------------------------------------
+                # Forward + loss
+                # --------------------------------------------------
+
                 with torch.autocast(
                     device_type="cuda",
                     dtype=torch.float16,
                 ):
+
                     total_loss, loss1, loss2, loss3 = diffusion(
                         lr,
                         hr,
@@ -646,30 +775,51 @@ def train():
                     )
 
                 if not torch.isfinite(total_loss):
+
                     raise RuntimeError(
                         f"Non-finite loss at step {step}"
                     )
 
-                scaler.scale(total_loss).backward()
+                # --------------------------------------------------
+                # Backward + optimizer
+                # --------------------------------------------------
 
-                scaler.unscale_(optimizer)
+                scaler.scale(
+                    total_loss
+                ).backward()
+
+                scaler.unscale_(
+                    optimizer
+                )
 
                 torch.nn.utils.clip_grad_norm_(
                     diffusion.parameters(),
                     1.0,
                 )
 
-                scaler.step(optimizer)
+                scaler.step(
+                    optimizer
+                )
+
                 scaler.update()
 
                 step += 1
 
-                if print_rank and (
-                    step % 10 == 0
-                    or step == 1
-                ):
-                    elapsed = time.time() - start_time
-                    steps_per_sec = step / max(elapsed, 1e-6)
+                # --------------------------------------------------
+                # Print EVERY training step
+                # --------------------------------------------------
+
+                if print_rank:
+
+                    elapsed = (
+                        time.time()
+                        - start_time
+                    )
+
+                    steps_per_sec = (
+                        step
+                        / max(elapsed, 1e-6)
+                    )
 
                     print(
                         f"step={step}/{MAX_STEPS} "
@@ -677,21 +827,28 @@ def train():
                         f"pixel={float(loss1.detach()):.6f} "
                         f"perc={float(loss2.detach()):.6f} "
                         f"grad={float(loss3.detach()):.6f} "
+                        f"fetch={fetch_time:.2f}s "
+                        f"wait={wait_time:.2f}s "
                         f"steps/s={steps_per_sec:.4f}"
                     )
+
+                # --------------------------------------------------
+                # Save checkpoint
+                # --------------------------------------------------
 
                 if print_rank and (
                     step % SAVE_EVERY == 0
                     or step == MAX_STEPS
                 ):
-                    raw_model = (
-                        diffusion.module.net
-                        if isinstance(diffusion, DDP)
-                        else diffusion.net
-                    )
+
+                    if hasattr(diffusion, "module"):
+                        raw_model = diffusion.module.net
+                    else:
+                        raw_model = diffusion.net
 
                     path = save_checkpoint(
                         raw_model,
+                        diffusion.module if isinstance(diffusion, DDP) else diffusion,
                         optimizer,
                         scaler,
                         epoch,
@@ -700,30 +857,21 @@ def train():
                         OUTPUT_DIR,
                     )
 
-                    print("Checkpoint:", path)
+                    print(
+                        "Checkpoint:",
+                        path,
+                    )
+
+                # --------------------------------------------------
+                # Cleanup
+                # --------------------------------------------------
 
                 del sample
                 del lr, hr, mask, edge
+
                 gc.collect()
 
-                # Release unused CUDA blocks between samples.
                 torch.cuda.empty_cache()
-
-            except Exception:
-                print(
-                    f"[rank {rank}] FAILURE on "
-                    f"{record['gt']}"
-                )
-                raise
-
-        start_epoch += 1
-
-    cleanup_distributed()
-
-    if print_rank:
-        print("\nTRAINING COMPLETE")
-
-
 def main():
     parser = argparse.ArgumentParser()
 
