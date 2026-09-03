@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-import bitsandbytes as bnb
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -31,7 +30,7 @@ from .kaggle_hf_stream import (
 ROOT = Path(__file__).resolve().parents[2]
 CHECKPOINT = ROOT / "checkpoints" / "epoch_200.pth"
 MANIFEST = ROOT / "hf_manifest" / "train_manifest.json"
-OUTPUT_DIR = ROOT / "results" / "cfg_finetune"
+OUTPUT_DIR = ROOT / "results" / "cfg_finetune_fp32"
 TMP_DIR = ROOT / "hf_tmp"
 
 
@@ -189,7 +188,7 @@ def make_sample(record, temp_dir):
         record,
         temp_dir,
     )
-PREFETCH_SIZE = 5
+PREFETCH_SIZE = 15
 
 
 def prefetch_sample(record, temp_dir):
@@ -423,8 +422,8 @@ def smoke_test():
 
     print("41-channel conditioning path: PASS")
 
-    # T4-safe AdamW:
-    # same AdamW optimization rule, 8-bit optimizer states.
+    # Standard AdamW:
+    # full-precision optimizer states for checkpoint compatibility.
     optimizer = torch.optim.AdamW(
         diffusion.parameters(),
         lr=LR,
@@ -578,9 +577,8 @@ def train():
 
     diffusion = build_diffusion(model).to(device)
 
-    # T4-safe AdamW:
-    # same AdamW optimization rule, 8-bit optimizer states.
-    optimizer = bnb.optim.AdamW8bit(
+    # Standard AdamW with full-precision optimizer states.
+    optimizer = torch.optim.AdamW(
         diffusion.parameters(),
         lr=LR,
         weight_decay=0.001,
@@ -872,6 +870,9 @@ def train():
                 gc.collect()
 
                 torch.cuda.empty_cache()
+
+        start_epoch = epoch + 1
+        
 def main():
     parser = argparse.ArgumentParser()
 
