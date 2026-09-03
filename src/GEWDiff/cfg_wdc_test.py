@@ -619,10 +619,7 @@ if __name__ == "__main__":
     print(f"Mask and edge: {config.mask} {config.edge}")
     print(f"L1, L2, L3 lambda: {config.l1_lambda} {config.l2_lambda} {config.l3_lambda}")
     print(f"Sigma Min, Sigma Max, Sigma Data, Rho: {config.sigma_min} {config.sigma_max} {config.sigma_data} {config.rho}")
-    PATH = "/kaggle/working/GEWDiff-BTP/results/fsdp_cfg/cfg_step_0001000.pth"
-    #PATH = "/kaggle/working/GEWDiff-BTP/results/best.pth"
-
-    PATH = "/kaggle/working/GEWDiff-BTP/results/fsdp_cfg/latest.pth"
+    PATH = "/home/aidslab/hemanth-ug4/GEWDiff-BTP/results/cfg_finetune_fp32/cfg_step_0002000.pth"
 
     checkpoint = torch.load(
         PATH,
@@ -649,7 +646,18 @@ if __name__ == "__main__":
         down_block_types=("DownBlock3D", "DownBlock3D", "DownBlock3D", "DownBlock3D", "CrossAttnDownBlock3D", "DownBlock3D"),
         up_block_types=("UpBlock3D", "CrossAttnUpBlock3D", "UpBlock3D", "UpBlock3D", "UpBlock3D", "UpBlock3D"),
         ).to("cuda", torch.float32)
-    model.load_state_dict(checkpoint['unet_state_dict'], strict=False)
+    missing, unexpected = model.load_state_dict(
+        checkpoint['unet_state_dict'],
+        strict=False
+    )
+
+    print("Missing keys:", missing)
+    print("Unexpected keys:", unexpected)
+
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Checkpoint/model mismatch: missing={missing}, unexpected={unexpected}"
+        )
     diffusion = CFGElucidatedDiffusion(model,image_size=config.out_size, channels=20,num_sample_steps=config.num_timesteps, l1_lambda=config.l1_lambda, l2_lambda=config.l2_lambda, l3_lambda=config.l3_lambda,
         sigma_min=config.sigma_min, sigma_max=config.sigma_max, sigma_data=config.sigma_data, rho=config.rho,p_drop=0.10)
     #diffusion.load_state_dict(checkpoint['gaussian_diff_config'], strict=False)
@@ -753,7 +761,10 @@ if __name__ == "__main__":
     result = quality_assessment(x_true, x_pred, data_range=data_range, ratio=4, multi_dimension=True)
     print(result)
     time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    np.save('/kaggle/working/GEWDiff-BTP/results/resultdiff_'+time+'.npy', x_pred)
+    np.save(
+        'results/cfg_finetune_fp32/resultdiff_' + time + '.npy',
+        x_pred
+    )
     image_recon_show=img_hsi[:,:,[40,30,20]]#[40,30,20]
     fig=plt.figure(figsize=(50, 50))
     fig.add_subplot(3, 3, 1)
