@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 from .model.edm import (
     ElucidatedDiffusion,
@@ -516,8 +516,6 @@ def smoke_test():
 
     del diffusion
     del model
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 def train():
@@ -694,8 +692,10 @@ def train():
 
                 wait_start = time.perf_counter()
 
-                result = futures.pop(0).result()
-
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                future = done.pop()
+                futures.remove(future)
+                result = future.result()
                 wait_time = (
                     time.perf_counter()
                     - wait_start

@@ -619,8 +619,24 @@ if __name__ == "__main__":
     print(f"Mask and edge: {config.mask} {config.edge}")
     print(f"L1, L2, L3 lambda: {config.l1_lambda} {config.l2_lambda} {config.l3_lambda}")
     print(f"Sigma Min, Sigma Max, Sigma Data, Rho: {config.sigma_min} {config.sigma_max} {config.sigma_data} {config.rho}")
-    PATH = "/home/aidslab/hemanth-ug4/GEWDiff-BTP/results/cfg_finetune_fp32/cfg_step_0002000.pth"
+    PATH = "/home/aidslab/hemanth-ug4/GEWDiff-BTP/results/cfg_finetune_fp32/cfg_step_0004000.pth"
+    from pathlib import Path
 
+    # ============================================================
+    # UNIQUE DIRECTORY FOR THIS EVALUATION RUN
+    # ============================================================
+    RESULTS_ROOT = Path(
+        "/home/aidslab/hemanth-ug4/GEWDiff-BTP/results/cfg_evaluations"
+    )
+
+    checkpoint_name = Path(PATH).stem
+    run_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    RUN_DIR = RESULTS_ROOT / f"{checkpoint_name}_{run_time}"
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+    print(f"Saving evaluation results to: {RUN_DIR}")
+    
     checkpoint = torch.load(
         PATH,
         map_location=lambda storage, loc: storage.cuda(0),
@@ -674,10 +690,16 @@ if __name__ == "__main__":
         error_map = torch.mean((predicted - ground_truth) ** 2, dim=-1)
         return error_map
     #image_gt1 = tifffile.imread('/workspace/diff_sr/data/test/gt/1216_hr_md.tif') /10000
-    image_gt1 = tifffile.imread('/kaggle/working/GEWDiff-BTP/src/GEWDiff/data/test_wdc/gt/output_input.tif')
+    image_gt1 = tifffile.imread(
+        '/home/aidslab/hemanth-ug4/GEWDiff-BTP/src/GEWDiff/data/test_wdc/gt/output_input.tif'
+    )
     #image_gt1 = tifffile.imread('/workspace/diff_sr/data/val2/gt/1016_flip2_hr_md.tif') /10000
     image_lr1 = resize_image_to_quarter(image_gt1)
-    test_dataset = Dataset('/kaggle/working/GEWDiff-BTP/src/GEWDiff/data/test_wdc',config, is_train=False)
+    test_dataset = Dataset(
+        '/home/aidslab/hemanth-ug4/GEWDiff-BTP/src/GEWDiff/data/test_wdc',
+        config,
+        is_train=False
+    )
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=config.eval_batch_size, shuffle=False)
     #image_lr = preprocess(image_lr1).permute(1, 0,  2).unsqueeze(0)
     for batch in test_loader:
@@ -755,11 +777,20 @@ if __name__ == "__main__":
     img_hsi = img_hsi.reshape((config.out_size, config.out_size, config.bands))/10000
     data_range = image_gt1.max() - image_gt1.min()
     print(img_hsi.min(),img_hsi.max(),image_gt1.min(),image_gt1.max(),data_range)
-    x_true, x_pred =image_gt1.transpose(1, 2,  0).reshape(256,256,config.bands), img_hsi
+    x_true = image_gt1.transpose(1, 2, 0).reshape(256, 256, config.bands)
+    x_pred = img_hsi.detach().cpu().numpy()
     x_pred = np.clip(x_pred, image_gt1.min(), image_gt1.max())
     #data_range = max(x_true.max(), x_pred.max()) - min(x_true.min(), x_pred.min())
     result = quality_assessment(x_true, x_pred, data_range=data_range, ratio=4, multi_dimension=True)
     print(result)
+    import json
+
+    with open(RUN_DIR / "metrics.json", "w") as f:
+        json.dump(
+            {key: float(value) for key, value in result.items()},
+            f,
+            indent=4
+        )
     time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     np.save(
         'results/cfg_finetune_fp32/resultdiff_' + time + '.npy',
@@ -811,7 +842,10 @@ if __name__ == "__main__":
     plt.title('Spectrum Comparison')
 
     plt.show()
-    plt.savefig('/kaggle/working/GEWDiff-BTP/results/resultdiff_rwa_pca.png', format='png')
+    plt.savefig(
+        RUN_DIR / "resultdiff_rwa_pca.png",
+        format="png"
+    )
 
     #plot histogram
     fig=plt.figure(figsize=(20, 20))
@@ -819,18 +853,21 @@ if __name__ == "__main__":
     #plt.hist(image_lr[0][1,:,:].flatten(), bins=100, alpha=0.7, color='b', label='Low Resolution Image')
     #plt.hist(image_recon[0][1,:,:].flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
     plt.hist(image_gt[0][1,:,:].flatten(), bins=100, alpha=0.7, color='g', label='Ground Truth Image')
-    plt.hist(img_lr_pca_shift[:,:,1].flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed PCA')
+    plt.hist(img_lr_pca_shift[:,:,1].detach().cpu().numpy().flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed PCA')
     plt.legend()
     plt.title('Histogram of Low Resolution Image, Reconstructed Image and Ground Truth Image')
     fig.add_subplot(1, 2, 2)
     #plt.hist(image_lr[0][2,:,:].flatten(), bins=100, alpha=0.7, color='b', label='Low Resolution Image')
     #plt.hist(image_recon[0][2,:,:].flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
     plt.hist(image_gt[0][2,:,:].flatten(), bins=100, alpha=0.7, color='g', label='Ground Truth Image')
-    plt.hist(img_lr_pca_shift[:,:,2].flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
+    plt.hist(img_lr_pca_shift[:,:,2].detach().cpu().numpy().flatten(), bins=100, alpha=0.7, color='r', label='Reconstructed Image')
     plt.legend()
     plt.title('Histogram of Low Resolution Image, Reconstructed Image and Ground Truth Image')
     plt.show()
-    plt.savefig('/kaggle/working/GEWDiff-BTP/results/hist_2.png', format='png')
+    plt.savefig(
+        RUN_DIR / "hist_2.png",
+        format="png"
+    )
     print('done',std_ratio)
 
 
