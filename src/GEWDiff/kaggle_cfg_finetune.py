@@ -31,6 +31,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CHECKPOINT = ROOT / "checkpoints" / "epoch_200.pth"
 MANIFEST = ROOT / "hf_manifest" / "train_manifest.json"
 OUTPUT_DIR = ROOT / "results" / "cfg_finetune_fp32"
+SAMPLE_ORDER_FILE = OUTPUT_DIR / "sample_order.npy"
+DATASET_STATE_FILE = OUTPUT_DIR / "dataset_state.json"
 TMP_DIR = ROOT / "hf_tmp"
 
 
@@ -45,7 +47,10 @@ P_DROP = 0.10
 
 # Fine-tuning default is deliberately configurable.
 LR = float(os.environ.get("GEW_FINETUNE_LR", "1e-5"))
-MAX_STEPS = int(os.environ.get("GEW_MAX_STEPS", "1000"))
+SAMPLES_PER_RUN = int(os.environ.get("GEW_SAMPLES_PER_RUN", "2000"))
+
+if SAMPLES_PER_RUN <= 0:
+    raise ValueError("GEW_SAMPLES_PER_RUN must be greater than 0")
 RESUME = os.environ.get("GEW_RESUME", "")
 SAVE_EVERY = int(os.environ.get("GEW_SAVE_EVERY", "100"))
 SEED = 42
@@ -630,23 +635,93 @@ def train():
 
     start_time = time.time()
 
-    while step < MAX_STEPS:
+    # ------------------------------------------------------------------
+    # Controlled sample/epoch progression
+    # ------------------------------------------------------------------
 
-        epoch = start_epoch
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-        rng = np.random.default_rng(
-            SEED + epoch
+    if world_size != 1:
+        raise RuntimeError(
+            "GEW_SAMPLES_PER_RUN mode currently requires world_size=1."
         )
 
-        order = rng.permutation(
-            len(manifest)
+    # Create/load one deterministic shuffled order for the current epoch.
+    if SAMPLE_ORDER_FILE.exists():
+        order = np.load(SAMPLE_ORDER_FILE)
+
+        if len(order) != len(manifest):
+            raise RuntimeError(
+                "Saved sample order does not match current manifest size."
+            )
+    else:
+        rng = np.random.default_rng(SEED)
+        order = rng.permutation(len(manifest)).astype(np.int64)
+        np.save(SAMPLE_ORDER_FILE, order)
+
+    # Load persistent dataset position.
+    if DATASET_STATE_FILE.exists():
+
+        with open(DATASET_STATE_FILE, "r") as f:
+            dataset_state = json.load(f)
+
+        current_epoch = int(dataset_state["epoch"])
+        sample_cursor = int(dataset_state["sample_cursor"])
+
+    else:
+
+        current_epoch = 0
+        sample_cursor = 0
+
+    # If the previous epoch was completed, begin a new epoch.
+    if sample_cursor >= len(manifest):
+
+        current_epoch += 1
+        sample_cursor = 0
+
+        rng = np.random.default_rng(SEED + current_epoch)
+        order = rng.permutation(len(manifest)).astype(np.int64)
+
+        np.save(SAMPLE_ORDER_FILE, order)
+
+    # Number of samples requested for THIS execution.
+    run_start = sample_cursor
+    run_end = min(
+        run_start + SAMPLES_PER_RUN,
+        len(manifest),
+    )
+
+    samples_this_run = run_end - run_start
+
+    print(
+        f"[rank {rank}] "
+        f"Epoch {current_epoch + 1} | "
+        f"samples {run_start}-{run_end - 1} | "
+        f"count={samples_this_run} | "
+        f"dataset={len(manifest)}"
+    )
+
+    # Save the intended run boundary.
+    dataset_state = {
+        "epoch": current_epoch,
+        "sample_cursor": run_start,
+        "run_end": run_end,
+    }
+
+    with open(DATASET_STATE_FILE, "w") as f:
+        json.dump(dataset_state, f, indent=2)
+
+
+    # ================================================================
+    # TRAINING LOOP
+    # ================================================================
+
+    while sample_cursor < run_end:
+
+        local_indices = list(
+            order[run_start:run_end]
         )
 
-        local_order = order[
-            rank::world_size
-        ]
-
-        local_indices = list(local_order)
 
         with ThreadPoolExecutor(
             max_workers=PREFETCH_SIZE
@@ -685,7 +760,7 @@ def train():
 
             for i, idx in enumerate(local_indices):
 
-                if step >= MAX_STEPS:
+                if sample_cursor >= run_end:
                     break
 
                 record = manifest[int(idx)]
@@ -836,7 +911,7 @@ def train():
 
                 if print_rank and (
                     step % SAVE_EVERY == 0
-                    or step == MAX_STEPS
+                    or step == run_end
                 ):
 
                     if hasattr(diffusion, "module"):
@@ -866,13 +941,60 @@ def train():
 
                 del sample
                 del lr, hr, mask, edge
+                if step % 100 == 0:
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
-                gc.collect()
+        # ------------------------------------------------------------------
+        # Update dataset cursor
+        # ------------------------------------------------------------------
 
-                torch.cuda.empty_cache()
+        if print_rank:
 
-        start_epoch = epoch + 1
-        
+            sample_cursor = run_end
+
+            if sample_cursor >= len(manifest):
+
+                # Entire dataset completed -> next run starts a new epoch.
+                current_epoch += 1
+                sample_cursor = 0
+
+                rng = np.random.default_rng(
+                    SEED + current_epoch
+                )
+
+                order = rng.permutation(
+                    len(manifest)
+                ).astype(np.int64)
+
+                np.save(
+                    SAMPLE_ORDER_FILE,
+                    order
+                )
+
+                print(
+                    f"[rank {rank}] "
+                    f"Epoch {current_epoch} completed. "
+                    f"Starting next epoch with a new shuffle."
+                )
+
+            else:
+
+                print(
+                    f"[rank {rank}] "
+                    f"Run completed. "
+                    f"Next sample cursor: {sample_cursor}"
+                )
+
+            dataset_state = {
+                "epoch": current_epoch,
+                "sample_cursor": sample_cursor,
+                "run_end": sample_cursor,
+            }
+
+            with open(DATASET_STATE_FILE, "w") as f:
+                json.dump(dataset_state, f, indent=2)
+                
 def main():
     parser = argparse.ArgumentParser()
 
