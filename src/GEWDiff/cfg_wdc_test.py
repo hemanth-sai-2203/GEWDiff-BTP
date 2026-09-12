@@ -619,7 +619,7 @@ if __name__ == "__main__":
     print(f"Mask and edge: {config.mask} {config.edge}")
     print(f"L1, L2, L3 lambda: {config.l1_lambda} {config.l2_lambda} {config.l3_lambda}")
     print(f"Sigma Min, Sigma Max, Sigma Data, Rho: {config.sigma_min} {config.sigma_max} {config.sigma_data} {config.rho}")
-    PATH = "/home/aidslab/hemanth-ug4/GEWDiff-BTP/results/cfg_finetune_fp32/cfg_step_0022200.pth"
+    PATH = "/home/aidslab/hemanth-ug4/GEWDiff-BTP/results/cfg_finetune_fp32/cfg_step_0028000.pth"
     from pathlib import Path
 
     # ============================================================
