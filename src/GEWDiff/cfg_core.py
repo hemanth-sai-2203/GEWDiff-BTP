@@ -44,6 +44,7 @@ class CFGElucidatedDiffusion(ElucidatedDiffusion):
         num_sample_steps=None,
         mask=None,
         guidance_scale=1.0,
+        guidance_scale_end=None,
         show_progress=True
     ):
         """
@@ -58,6 +59,9 @@ class CFGElucidatedDiffusion(ElucidatedDiffusion):
 
         if guidance_scale < 0:
             raise ValueError("guidance_scale must be >= 0")
+
+        if guidance_scale_end is not None and guidance_scale_end < 0:
+            raise ValueError("guidance_scale_end must be >= 0")
 
         device = img_lr.device
 
@@ -105,6 +109,17 @@ class CFGElucidatedDiffusion(ElucidatedDiffusion):
 
             sigma = sigmas[i].item()
 
+            # Dynamic CFG: guidance increases as denoising progresses.
+            if guidance_scale_end is not None:
+                progress = i / max(1, len(sigmas) - 2)
+                current_guidance_scale = (
+                    guidance_scale
+                    + progress
+                    * (guidance_scale_end - guidance_scale)
+                )
+            else:
+                current_guidance_scale = guidance_scale
+
             # Conditional prediction
             denoised_cond = self.preconditioned_network_forward(
                 images,
@@ -114,7 +129,7 @@ class CFGElucidatedDiffusion(ElucidatedDiffusion):
                 i=i
             )
 
-            if guidance_scale == 1.0:
+            if current_guidance_scale == 1.0:
 
                 denoised = denoised_cond
 
@@ -141,7 +156,7 @@ class CFGElucidatedDiffusion(ElucidatedDiffusion):
 
                 denoised = (
                     denoised_uncond
-                    + guidance_scale
+                    + current_guidance_scale
                     * (denoised_cond - denoised_uncond)
                 )
 

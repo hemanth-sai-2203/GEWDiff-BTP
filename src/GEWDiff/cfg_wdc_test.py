@@ -619,7 +619,7 @@ if __name__ == "__main__":
     print(f"Mask and edge: {config.mask} {config.edge}")
     print(f"L1, L2, L3 lambda: {config.l1_lambda} {config.l2_lambda} {config.l3_lambda}")
     print(f"Sigma Min, Sigma Max, Sigma Data, Rho: {config.sigma_min} {config.sigma_max} {config.sigma_data} {config.rho}")
-    PATH = "/home/aidslab/hemanth-ug4/GEWDiff-BTP/results/cfg_finetune_fp32/cfg_step_0004000.pth"
+    PATH = "/home/aidslab/hemanth-ug4/GEWDiff-BTP/results/cfg_finetune_fp32/cfg_step_0022200.pth"
     from pathlib import Path
 
     # ============================================================
@@ -715,14 +715,28 @@ if __name__ == "__main__":
         break
     print(image_lr[0,0,0,0],image_lr.shape,image_gt.shape,img_lr_recov.shape)
     image_lr = image_lr.to("cuda")
-    guidance_scale = 2.0
+    guidance_scale = float(os.environ.get("GEW_GUIDANCE_SCALE", "2.0"))
+    guidance_scale_end_env = os.environ.get("GEW_GUIDANCE_SCALE_END", "")
+    guidance_scale_end = (
+        float(guidance_scale_end_env)
+        if guidance_scale_end_env
+        else None
+    )
+    if guidance_scale_end is None:
+        print(f"CFG Guidance Scale: {guidance_scale}")
+    else:
+        print(
+            f"CFG Guidance Schedule: "
+            f"{guidance_scale} -> {guidance_scale_end}"
+        )
 
     if config.mask & config.edge == False:
         image_recon, images = diffusion.sample_cfg(
             image_lr,
             batch_size=1,
             num_sample_steps=50,
-            guidance_scale=guidance_scale
+            guidance_scale=guidance_scale,
+            guidance_scale_end=guidance_scale_end
         )
 
     elif config.mask == False & config.edge == True:
@@ -730,7 +744,8 @@ if __name__ == "__main__":
             image_lr,
             batch_size=1,
             num_sample_steps=50,
-            guidance_scale=guidance_scale
+            guidance_scale=guidance_scale,
+            guidance_scale_end=guidance_scale_end
         )
 
     elif config.mask == True & config.edge == False:
@@ -739,7 +754,8 @@ if __name__ == "__main__":
             mask=mask,
             batch_size=1,
             num_sample_steps=50,
-            guidance_scale=guidance_scale
+            guidance_scale=guidance_scale,
+            guidance_scale_end=guidance_scale_end
         )
 
     else:
@@ -748,7 +764,8 @@ if __name__ == "__main__":
             mask=mask,
             batch_size=1,
             num_sample_steps=50,
-            guidance_scale=guidance_scale
+            guidance_scale=guidance_scale,
+            guidance_scale_end=guidance_scale_end
         )
     RWAim = torch.zeros((config.out_size * config.out_size, config.bands))
     img_pca = torch.zeros((config.out_size * config.out_size, config.compack_bands))
@@ -791,11 +808,7 @@ if __name__ == "__main__":
             f,
             indent=4
         )
-    time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    np.save(
-        'results/cfg_finetune_fp32/resultdiff_' + time + '.npy',
-        x_pred
-    )
+    np.save(RUN_DIR / "reconstruction.npy", x_pred)
     image_recon_show=img_hsi[:,:,[40,30,20]]#[40,30,20]
     fig=plt.figure(figsize=(50, 50))
     fig.add_subplot(3, 3, 1)

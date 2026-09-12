@@ -877,6 +877,7 @@ def train():
                 scaler.update()
 
                 step += 1
+                sample_cursor += 1
 
                 # --------------------------------------------------
                 # Print EVERY training step
@@ -895,7 +896,7 @@ def train():
                     )
 
                     print(
-                        f"step={step}/{MAX_STEPS} "
+                        f"step={step} "
                         f"loss={float(total_loss.detach()):.6f} "
                         f"pixel={float(loss1.detach()):.6f} "
                         f"perc={float(loss2.detach()):.6f} "
@@ -911,7 +912,7 @@ def train():
 
                 if print_rank and (
                     step % SAVE_EVERY == 0
-                    or step == run_end
+                    or sample_cursor == run_end
                 ):
 
                     if hasattr(diffusion, "module"):
@@ -924,7 +925,7 @@ def train():
                         diffusion.module if isinstance(diffusion, DDP) else diffusion,
                         optimizer,
                         scaler,
-                        epoch,
+                        current_epoch,
                         step,
                         float(total_loss.detach()),
                         OUTPUT_DIR,
@@ -950,9 +951,6 @@ def train():
         # ------------------------------------------------------------------
 
         if print_rank:
-
-            sample_cursor = run_end
-
             if sample_cursor >= len(manifest):
 
                 # Entire dataset completed -> next run starts a new epoch.
